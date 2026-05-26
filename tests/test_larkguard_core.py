@@ -14,7 +14,8 @@ from src.lark_adapter import (
     pick_workflow_id,
     resolve_execution_status,
 )
-from src.run_health import compute_run_health, format_health_summary_line
+from src.run_health import compute_run_health, format_health_summary_line, run_comment_headline
+from src.service import VerificationService
 from src.models import (
     ArtifactKind,
     BriefClassification,
@@ -176,6 +177,61 @@ def test_comment_includes_sponsor_lines_for_live_parser_and_adapter() -> None:
     assert "live getlark workflow execution proof" in comment
     assert "**Primary requested:** `getlark_live_check`" in comment
     assert "**Live sponsor run**" in comment
+
+
+def test_live_check_without_execution_id_gets_rest_sponsor_banner() -> None:
+    result = VerificationResult(
+        status=ResultStatus.SIMULATED,
+        outcome_summary="Live list only.",
+        evidence=[
+            ExecutionArtifact(
+                kind=ArtifactKind.LOG,
+                label="live_api",
+                content="Real getlark API call succeeded: GET /workflows → HTTP 200",
+            )
+        ],
+        execution_notes=[],
+        resilience_notes=[],
+        confidence=BriefConfidence(level=ConfidenceLevel.MEDIUM, reason="list ok"),
+    )
+    response = VerifyResponse(
+        run_id="abc123def456",
+        status=RunStatus.COMPLETED,
+        issue=_issue(),
+        comments=[],
+        evidence_packet={
+            "problem_statement": "x",
+            "raw_report_text": "x",
+            "report_quality_hints": {
+                "has_body": True,
+                "has_repro_signals": True,
+                "comment_count": 0,
+                "label_count": 0,
+            },
+            "combined_text": "x",
+        },
+        verification_brief=_brief(),
+        verification_plan=_plan(),
+        verification_result=result,
+        adapter_used="getlark_live_check",
+        primary_adapter_requested="getlark_live_check",
+    )
+    assert run_comment_headline(response) == (
+        "> **Live sponsor run** — real getlark REST live check succeeded."
+    )
+
+
+def test_cli_live_fallback_uses_adapter_specific_wording() -> None:
+    result, adapter_used = VerificationService._fallback_after_live_adapter_failure(
+        _plan(),
+        _brief(),
+        _issue(),
+        "getlark CLI not found",
+        failed_adapter="getlark_cli_live",
+    )
+    assert adapter_used == "fake"
+    assert result.execution_notes[0] == "getlark_cli_live failed: getlark CLI not found"
+    assert any("getlark_cli_live failed; fell back to fake adapter" in n for n in result.resilience_notes)
 
 
 def test_pick_workflow_id_prefers_env_name() -> None:

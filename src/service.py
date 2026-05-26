@@ -278,20 +278,25 @@ class VerificationService:
 
         adapter_used = selection.adapter_id
         fallback_triggered = False
-        live_check_error: str | None = None
+        live_adapter_error: str | None = None
+        failed_live_adapter = selection.adapter_id
 
         try:
             result = selection.adapter.execute(plan, brief, issue)
         except LiveCheckFailedError as exc:
-            live_check_error = str(exc)
+            live_adapter_error = str(exc)
             if getlark_strict_mode():
                 raise ServiceError(
-                    live_check_error,
-                    error_type="getlark_live_check_failed",
+                    live_adapter_error,
+                    error_type=f"{failed_live_adapter}_failed",
                     status_code=502,
                 ) from exc
-            result, adapter_used = self._fallback_after_live_check_failure(
-                plan, brief, issue, live_check_error
+            result, adapter_used = self._fallback_after_live_adapter_failure(
+                plan,
+                brief,
+                issue,
+                live_adapter_error,
+                failed_adapter=failed_live_adapter,
             )
             fallback_triggered = True
 
@@ -324,16 +329,18 @@ class VerificationService:
         )
 
     @staticmethod
-    def _fallback_after_live_check_failure(
+    def _fallback_after_live_adapter_failure(
         plan: VerificationPlan,
         brief,
         issue: IssueSummary,
         error: str,
+        *,
+        failed_adapter: str,
     ) -> tuple[VerificationResult, str]:
         fake = FakeLarkAdapter()
         result = fake.execute(plan, brief, issue)
         notes = list(result.execution_notes)
-        notes.insert(0, f"getlark_live_check failed: {error}")
+        notes.insert(0, f"{failed_adapter} failed: {error}")
         notes.append("Fell back to fake adapter for demo-safe completion")
         resilience = [
             note
@@ -342,8 +349,8 @@ class VerificationService:
         ]
         resilience.extend(
             [
-                "getlark_live_check failed; fell back to fake adapter",
-                "Fallback path executed after live API error",
+                f"{failed_adapter} failed; fell back to fake adapter",
+                "Fallback path executed after live getlark adapter error",
             ]
         )
         result = result.model_copy(

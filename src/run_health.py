@@ -29,9 +29,18 @@ def _has_execution_id(response: VerifyResponse) -> bool:
     return any(artifact.label == "execution_id" for artifact in result.evidence)
 
 
+_LIVE_GETLARK_ADAPTERS = frozenset({"getlark_live_check", "getlark_cli_live"})
+
+
+def is_live_getlark_adapter(adapter_used: str | None) -> bool:
+    return (adapter_used or "") in _LIVE_GETLARK_ADAPTERS
+
+
 def run_comment_headline(response: VerifyResponse) -> str | None:
     """Top-of-comment banner for judge glanceability."""
     health = compute_run_health(response)
+    adapter = response.adapter_used or ""
+
     if health == "degraded-both":
         return (
             "> **Degraded run** — parser and adapter fallbacks executed; "
@@ -42,12 +51,12 @@ def run_comment_headline(response: VerifyResponse) -> str | None:
     if health == "degraded-adapter":
         return "> **Degraded run** — fell back to resilient fallback executor."
 
-    if _has_execution_id(response) and (
-        response.adapter_used or ""
-    ).startswith("getlark"):
+    if _has_execution_id(response) and adapter.startswith("getlark"):
         return "> **Live sponsor run** — getlark execution proof captured."
+    if adapter == "getlark_live_check":
+        return "> **Live sponsor run** — real getlark REST live check succeeded."
+    if adapter == "getlark_cli_live":
+        return "> **Live sponsor run** — real getlark CLI path executed."
     if response.parser_used == "truefoundry_gateway":
         return "> **Live sponsor run** — TrueFoundry gateway parser active."
-    if (response.adapter_used or "").endswith("_live") or response.adapter_used == "getlark_cli_live":
-        return "> **Live sponsor run** — real getlark CLI/API path executed."
     return "> **Healthy run** — completed without fallback."

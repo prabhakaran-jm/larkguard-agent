@@ -149,7 +149,7 @@ GETLARK_CLI_BIN=getlark              # path to @getlark/cli binary
 
 **What counts as a “real call”:** A successful `GET /workflows` with HTTP 2xx and JSON parsed into `verification_result.evidence` (`live_api`, `workflows`, `api_response` artifacts). If `GETLARK_ENABLE_WORKFLOW_INVOKE=true`, LarkGuard also attempts `POST /workflows/{workflow_id}/invoke` and stores invoke evidence (`invoke_attempt`, `invoke_response`, `execution_id`).
 
-**On live failure** (`GETLARK_STRICT_MODE=false`, default): verify still completes via **fake adapter**; `fallback_triggered=true`, `adapter_used=fake`, and notes explain the API error. With `GETLARK_STRICT_MODE=true`, verify returns HTTP 502 with `getlark_live_check_failed`.
+**On live failure** (`GETLARK_STRICT_MODE=false`, default): verify still completes via **fake adapter**; `fallback_triggered=true`, `adapter_used=fake`, and notes explain the API/CLI error. With `GETLARK_STRICT_MODE=true`, verify returns HTTP 502 with `{adapter_id}_failed` (e.g. `getlark_cli_live_failed`).
 
 **Test command:**
 
