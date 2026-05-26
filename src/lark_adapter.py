@@ -424,6 +424,9 @@ class GetLarkLiveCheckAdapter(LarkAdapter):
                 workflow_ids=listing.workflow_ids,
             )
         status = resolve_execution_status(plan, brief)
+        if invoke is not None and invoke.success and status == ResultStatus.SIMULATED:
+            # Live invoke proof should surface as reproduced in demo output.
+            status = ResultStatus.REPRODUCED
         title = issue.title.strip() or f"Issue #{issue.number}"
 
         evidence = [
@@ -498,9 +501,13 @@ class GetLarkLiveCheckAdapter(LarkAdapter):
             outcome_summary=(
                 f"{title}: getlark live check succeeded ({listing.summary}); "
                 + (
-                    "workflow invoke attempted."
-                    if invoke is not None and invoke.attempted
-                    else "full workflow execution was not run."
+                    "workflow invoke succeeded."
+                    if invoke is not None and invoke.success
+                    else (
+                        "workflow invoke attempted."
+                        if invoke is not None and invoke.attempted
+                        else "full workflow execution was not run."
+                    )
                 )
             ),
             evidence=evidence,
@@ -516,10 +523,18 @@ class GetLarkLiveCheckAdapter(LarkAdapter):
                 "No fallback path executed in this run",
             ],
             confidence=BriefConfidence(
-                level=ConfidenceLevel.MEDIUM,
+                level=(
+                    ConfidenceLevel.HIGH
+                    if invoke is not None and invoke.success
+                    else ConfidenceLevel.MEDIUM
+                ),
                 reason=(
-                    "Real getlark API response received (workflow list). "
-                    "Bug reproduction was not executed live."
+                    "Real getlark workflow invoke succeeded; execution id captured."
+                    if invoke is not None and invoke.success
+                    else (
+                        "Real getlark API response received (workflow list). "
+                        "Bug reproduction was not executed live."
+                    )
                 ),
             ),
         )

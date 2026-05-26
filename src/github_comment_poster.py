@@ -87,6 +87,10 @@ def render_verification_comment(response: VerifyResponse) -> str:
             f"- **Run ID:** `{response.run_id}`",
         ]
     )
+    if response.adapter_used and response.adapter_used.startswith("getlark"):
+        lines.append("- **Execution engine:** Powered by [getlark.ai](https://getlark.ai)")
+    if response.parser_used == "truefoundry_gateway":
+        lines.append("- **Parser engine:** Powered by [TrueFoundry AI Gateway](https://www.truefoundry.com)")
     if response.fallback_triggered:
         lines.append(
             f"- **Fallback:** yes (`{response.primary_adapter_requested}` → `{adapter}`)"
