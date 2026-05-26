@@ -33,7 +33,17 @@ COMMENT_ONLY_ON_COMPLETED = os.getenv("COMMENT_ONLY_ON_COMPLETED", "true").strip
     "yes",
 )
 
-_VALID_LARK_MODES = frozenset({"fake", "getlark_mcp", "getlark_cli"})
+GETLARK_STRICT_MODE = os.getenv("GETLARK_STRICT_MODE", "false").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+)
+try:
+    GETLARK_TIMEOUT_SECONDS = float(os.getenv("GETLARK_TIMEOUT_SECONDS", "15"))
+except ValueError:
+    GETLARK_TIMEOUT_SECONDS = 15.0
+
+_VALID_LARK_MODES = frozenset({"fake", "getlark_mcp", "getlark_cli", "getlark_live_check"})
 _VALID_FAULT_MODES = frozenset({"none", "force_adapter_failure", "force_fallback_note"})
 _MODE_ALIASES = {"openapi_mcp": "getlark_mcp"}
 
@@ -71,3 +81,7 @@ def fault_injection_mode() -> str:
     if FAULT_INJECTION_MODE in _VALID_FAULT_MODES:
         return FAULT_INJECTION_MODE
     return "none"
+
+
+def getlark_strict_mode() -> bool:
+    return GETLARK_STRICT_MODE

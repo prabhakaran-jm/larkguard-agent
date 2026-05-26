@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+import json
 import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Any, Literal
+
+import httpx
 
 from src.config import (
     GETLARK_API_KEY,
     GETLARK_API_URL,
+    GETLARK_TIMEOUT_SECONDS,
     effective_primary_adapter_mode,
     fault_injection_mode,
     getlark_credentials_complete,
@@ -28,7 +32,8 @@ from src.models import (
     VerificationResult,
 )
 
-# TODO: wire real getlark MCP HTTP client (https://api.getlark.ai/mcp) in GetLarkMcpAdapter
+# TODO: wire full getlark workflow invoke (create + --wait) after live connectivity check
+# TODO: wire real getlark MCP tool calls in GetLarkMcpAdapter
 # TODO: wire real getlark CLI subprocess (@getlark/cli workflows create/invoke) in GetLarkCliAdapter
 # TODO: artifact persistence — save screenshots/logs from getlark executions per run
 # TODO: resilience_gateway wrapping adapter execution — fallback on MCP/CLI outage
@@ -46,6 +51,80 @@ class LarkAdapterSelection:
     adapter: LarkAdapter
     adapter_id: str
     preamble_notes: list[str] = field(default_factory=list)
+
+
+class LiveCheckFailedError(Exception):
+    """Raised when getlark_live_check cannot complete a real API call."""
+
+
+@dataclass
+class GetLarkWorkflowListResult:
+    endpoint: str
+    status_code: int
+    workflow_count: int
+    summary: str
+    response_snippet: str
+
+
+class GetLarkApiClient:
+    """Minimal getlark REST client (workflow list = auth + connectivity check)."""
+
+    def __init__(
+        self,
+        api_key: str,
+        api_url: str,
+        timeout_seconds: float = GETLARK_TIMEOUT_SECONDS,
+    ) -> None:
+        if not api_key:
+            raise ValueError("GETLARK_API_KEY is required")
+        self._api_key = api_key
+        self._api_url = api_url.rstrip("/")
+        self._timeout = timeout_seconds
+
+    def list_workflows(self, *, limit: int = 5) -> GetLarkWorkflowListResult:
+        endpoint = f"{self._api_url}/workflows"
+        params = {"limit": max(1, min(limit, 20))}
+        headers = {
+            "Accept": "application/json",
+            "X-API-Key": self._api_key,
+        }
+        try:
+            with httpx.Client(timeout=self._timeout) as client:
+                response = client.get(endpoint, headers=headers, params=params)
+        except httpx.RequestError as exc:
+            raise LiveCheckFailedError(f"Network error calling getlark API: {exc}") from exc
+
+        if response.status_code in {401, 403}:
+            raise LiveCheckFailedError(
+                f"getlark API rejected credentials (HTTP {response.status_code})"
+            )
+        if response.status_code == 404:
+            raise LiveCheckFailedError(
+                f"getlark workflows endpoint not found (HTTP 404) at {endpoint}"
+            )
+        if response.status_code >= 500:
+            raise LiveCheckFailedError(
+                f"getlark API server error (HTTP {response.status_code})"
+            )
+        if response.status_code >= 400:
+            raise LiveCheckFailedError(
+                f"getlark API error (HTTP {response.status_code}): {response.text[:200]}"
+            )
+
+        try:
+            payload: Any = response.json()
+        except ValueError as exc:
+            raise LiveCheckFailedError("getlark API returned non-JSON response") from exc
+
+        count, summary = _summarize_workflow_list(payload)
+        snippet = json.dumps(payload, indent=2)[:1200]
+        return GetLarkWorkflowListResult(
+            endpoint=endpoint,
+            status_code=response.status_code,
+            workflow_count=count,
+            summary=summary,
+            response_snippet=snippet,
+        )
 
 
 class LarkAdapter(ABC):
@@ -90,7 +169,17 @@ def resolve_lark_adapter_for_mode(mode: str) -> LarkAdapterSelection:
             preamble_notes=["Adapter selected: getlark_cli_scaffold"],
         )
 
-    if mode in ("getlark_mcp", "getlark_cli"):
+    if mode == "getlark_live_check" and getlark_credentials_complete():
+        return LarkAdapterSelection(
+            adapter=GetLarkLiveCheckAdapter(
+                api_key=GETLARK_API_KEY,
+                api_url=GETLARK_API_URL,
+            ),
+            adapter_id="getlark_live_check",
+            preamble_notes=["Adapter selected: getlark_live_check"],
+        )
+
+    if mode in ("getlark_mcp", "getlark_cli", "getlark_live_check"):
         return LarkAdapterSelection(
             adapter=FakeLarkAdapter(),
             adapter_id="fake",
@@ -219,6 +308,84 @@ def plan_verification(brief: VerificationBrief) -> VerificationPlan:
         assumptions=assumptions,
         blockers=[],
     )
+
+
+class GetLarkLiveCheckAdapter(LarkAdapter):
+    """Thin real getlark integration: GET /workflows to validate API key and connectivity."""
+
+    adapter_id = "getlark_live_check"
+
+    def __init__(self, api_key: str, api_url: str) -> None:
+        self._client = GetLarkApiClient(api_key=api_key, api_url=api_url)
+
+    def execute(
+        self,
+        plan: VerificationPlan,
+        brief: VerificationBrief,
+        issue: IssueSummary,
+    ) -> VerificationResult:
+        listing = self._client.list_workflows(limit=5)
+        status = resolve_execution_status(plan, brief)
+        title = issue.title.strip() or f"Issue #{issue.number}"
+
+        evidence = [
+            ExecutionArtifact(
+                kind=ArtifactKind.LOG,
+                label="live_api",
+                content=(
+                    f"Real getlark API call succeeded: GET {listing.endpoint} "
+                    f"→ HTTP {listing.status_code}"
+                ),
+            ),
+            ExecutionArtifact(
+                kind=ArtifactKind.NOTE,
+                label="workflows",
+                content=listing.summary,
+            ),
+            ExecutionArtifact(
+                kind=ArtifactKind.TRACE,
+                label="api_response",
+                content=listing.response_snippet,
+            ),
+            ExecutionArtifact(
+                kind=ArtifactKind.NOTE,
+                label="scope",
+                content=(
+                    "Live check only — listed workflows; did not create or invoke a "
+                    "getlark test run for this GitHub issue"
+                ),
+            ),
+        ]
+
+        return VerificationResult(
+            status=status,
+            outcome_summary=(
+                f"{title}: getlark live check succeeded ({listing.summary}); "
+                "full workflow execution was not run."
+            ),
+            evidence=evidence,
+            execution_notes=execution_notes(
+                plan,
+                brief,
+                status,
+                adapter_label="getlark_live_check",
+                extra=[
+                    f"Real getlark API call: GET {listing.endpoint}",
+                    "This confirms API key and connectivity, not bug reproduction",
+                ],
+            ),
+            resilience_notes=[
+                "No resilience gateway configured yet",
+                "No fallback path executed in this run",
+            ],
+            confidence=BriefConfidence(
+                level=ConfidenceLevel.MEDIUM,
+                reason=(
+                    "Real getlark API response received (workflow list). "
+                    "Bug reproduction was not executed live."
+                ),
+            ),
+        )
 
 
 class FakeLarkAdapter(LarkAdapter):
@@ -558,3 +725,25 @@ def _concise_goal(brief: VerificationBrief) -> str:
     if " — classified as " in summary:
         return summary.split(" — classified as ")[0]
     return summary or "Verify reported bug behavior"
+
+
+def _summarize_workflow_list(payload: Any) -> tuple[int, str]:
+    items: list[Any]
+    if isinstance(payload, list):
+        items = payload
+    elif isinstance(payload, dict):
+        raw = payload.get("workflows") or payload.get("data") or payload.get("items")
+        items = raw if isinstance(raw, list) else []
+    else:
+        return 0, "unexpected response shape"
+
+    names: list[str] = []
+    for item in items[:5]:
+        if isinstance(item, dict):
+            name = item.get("name") or item.get("id") or item.get("workflow_id")
+            if name:
+                names.append(str(name))
+
+    if names:
+        return len(items), f"{len(items)} workflow(s); examples: {', '.join(names)}"
+    return len(items), f"{len(items)} workflow(s) returned"

@@ -45,7 +45,7 @@ Bug reports are noisy. Maintainers waste time guessing whether an issue is actio
 - `demo-issue-text` CLI helper for seed issues
 - Compact comment layout + richer verify CLI summary
 
-**Not yet:** Live getlark MCP/CLI calls, LLM parsing, TrueFoundry gateway, auth, database, or webhooks.
+**Not yet:** Full getlark workflow invoke for bug reproduction, LLM parsing, TrueFoundry gateway, auth, database, or webhooks.
 
 ## Parser (Step 2)
 
@@ -77,7 +77,46 @@ This makes the demo flow visible: **plan → execute → result**, with statuses
 | `fake` (default) | `LARK_MODE=fake` or unset | Reliable simulated execution |
 | `getlark_mcp` | `LARK_MODE=getlark_mcp` + `GETLARK_API_KEY` | Scaffold describes MCP workflow at `api.getlark.ai/mcp`; **no HTTP calls** |
 | `getlark_cli` | `LARK_MODE=getlark_cli` + `GETLARK_API_KEY` | Scaffold shows `getlark workflows create/invoke` commands; **no subprocess** |
+| `getlark_live_check` | `LARK_MODE=getlark_live_check` + `GETLARK_API_KEY` | **Real HTTP** `GET /workflows` — validates API key and connectivity only |
 | Missing API key | mode set, no `GETLARK_API_KEY` | **Falls back to fake** with a note in `verification_result` |
+
+### Thin real getlark mode (`getlark_live_check`)
+
+The thinnest honest integration: one real REST call to list workflows (`GET {GETLARK_API_URL}/workflows?limit=5` with `X-API-Key`). This proves credentials and reachability — **not** full live test execution for the GitHub issue.
+
+**Required env:**
+
+```env
+GETLARK_API_KEY=your_key_from_dashboard
+GETLARK_API_URL=https://api.getlark.ai
+LARK_MODE=getlark_live_check
+# or override per run:
+PRIMARY_ADAPTER_MODE=getlark_live_check
+```
+
+**Optional:**
+
+```env
+GETLARK_STRICT_MODE=false    # true = fail verify on live API error (no fake fallback)
+GETLARK_TIMEOUT_SECONDS=15
+```
+
+**What counts as a “real call”:** A successful `GET /workflows` with HTTP 2xx and JSON parsed into `verification_result.evidence` (`live_api`, `workflows`, `api_response` artifacts). `execution_notes` state that a real API call was made; `resilience_notes` include `No fallback path executed in this run`.
+
+**On live failure** (`GETLARK_STRICT_MODE=false`, default): verify still completes via **fake adapter**; `fallback_triggered=true`, `adapter_used=fake`, and notes explain the API error. With `GETLARK_STRICT_MODE=true`, verify returns HTTP 502 with `getlark_live_check_failed`.
+
+**Test command:**
+
+```bash
+FAULT_INJECTION_MODE=none PRIMARY_ADAPTER_MODE=getlark_live_check \
+  python -m src.cli verify --issue-number 2 --local
+```
+
+**Success output (CLI):** `adapter_used: getlark_live_check`, `fallback_triggered: false`, result mentions “getlark live check succeeded”.
+
+**Fallback output:** `adapter_used: fake`, `fallback_triggered: true`, execution notes start with `getlark_live_check failed: …`.
+
+**Current limitation:** No workflow create/invoke yet — scaffold modes and fake execution still handle the demo path.
 
 **`.env` for getlark scaffold:**
 
@@ -91,7 +130,7 @@ Get your API key: [getlark.ai](https://getlark.ai) → Settings → API Keys. Do
 
 **Why fallback is intentional:** Demos should not fail without credentials. `execution_notes` always shows which adapter ran.
 
-**Current limitation:** Scaffolds only — real `api.getlark.ai` MCP/CLI wiring is the next step.
+**Current limitation:** MCP/CLI scaffolds do not call the API; use `getlark_live_check` for a real HTTP touchpoint. Full workflow invoke is the next step.
 
 ## GitHub comments & fault injection (Step 5)
 
@@ -101,7 +140,7 @@ Post a markdown verification summary back to the GitHub issue (requires token sc
 ENABLE_GITHUB_COMMENTS=true
 COMMENT_ONLY_ON_COMPLETED=true
 
-PRIMARY_ADAPTER_MODE=fake          # or getlark_mcp / getlark_cli
+PRIMARY_ADAPTER_MODE=fake          # or getlark_mcp / getlark_cli / getlark_live_check
 FAULT_INJECTION_MODE=none          # none | force_adapter_failure | force_fallback_note
 ```
 
