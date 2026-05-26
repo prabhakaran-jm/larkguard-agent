@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import subprocess
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Literal
@@ -11,8 +13,12 @@ import httpx
 from src.config import (
     GETLARK_API_KEY,
     GETLARK_API_URL,
+    GETLARK_CLI_BIN,
+    GETLARK_ENABLE_CLI_LIVE,
     GETLARK_ENABLE_WORKFLOW_INVOKE,
     GETLARK_TIMEOUT_SECONDS,
+    GETLARK_WORKFLOW_ID,
+    GETLARK_WORKFLOW_NAME,
     effective_primary_adapter_mode,
     fault_injection_mode,
     getlark_credentials_complete,
@@ -55,7 +61,13 @@ class LarkAdapterSelection:
 
 
 class LiveCheckFailedError(Exception):
-    """Raised when getlark_live_check cannot complete a real API call."""
+    """Raised when a live getlark adapter cannot complete a real API/CLI call."""
+
+
+@dataclass
+class GetLarkWorkflowRef:
+    workflow_id: str
+    name: str | None = None
 
 
 @dataclass
@@ -66,6 +78,18 @@ class GetLarkWorkflowListResult:
     summary: str
     response_snippet: str
     workflow_ids: list[str]
+    workflow_refs: list[GetLarkWorkflowRef] = field(default_factory=list)
+
+
+@dataclass
+class GetLarkCliListResult:
+    attempted: bool
+    command: str
+    exit_code: int | None
+    success: bool
+    summary: str
+    stdout_snippet: str
+    stderr_snippet: str
 
 
 @dataclass
@@ -131,7 +155,8 @@ class GetLarkApiClient:
             raise LiveCheckFailedError("getlark API returned non-JSON response") from exc
 
         count, summary = _summarize_workflow_list(payload)
-        workflow_ids = _extract_workflow_ids(payload)
+        workflow_refs = _extract_workflow_refs(payload)
+        workflow_ids = [ref.workflow_id for ref in workflow_refs]
         snippet = json.dumps(payload, indent=2)[:1200]
         return GetLarkWorkflowListResult(
             endpoint=endpoint,
@@ -140,6 +165,7 @@ class GetLarkApiClient:
             summary=summary,
             response_snippet=snippet,
             workflow_ids=workflow_ids,
+            workflow_refs=workflow_refs,
         )
 
     def invoke_workflow_best_effort(
@@ -147,13 +173,13 @@ class GetLarkApiClient:
         *,
         plan: VerificationPlan,
         issue: IssueSummary,
-        workflow_ids: list[str],
+        workflow_refs: list[GetLarkWorkflowRef],
     ) -> GetLarkInvokeResult:
         """
         Thin real invoke attempt for sponsor proof.
         Best effort only: never raises, preserves caller fallback behavior.
         """
-        if not workflow_ids:
+        if not workflow_refs:
             return GetLarkInvokeResult(
                 attempted=False,
                 endpoint=f"{self._api_url}/workflows/{{id}}/invoke",
@@ -163,7 +189,20 @@ class GetLarkApiClient:
                 response_snippet="{}",
             )
 
-        workflow_id = workflow_ids[0]
+        workflow_id = pick_workflow_id(
+            workflow_refs,
+            workflow_id=GETLARK_WORKFLOW_ID,
+            workflow_name=GETLARK_WORKFLOW_NAME,
+        )
+        if not workflow_id:
+            return GetLarkInvokeResult(
+                attempted=False,
+                endpoint=f"{self._api_url}/workflows/{{id}}/invoke",
+                status_code=None,
+                success=False,
+                summary="No matching workflow id for invoke attempt.",
+                response_snippet="{}",
+            )
         # Matches @getlark/cli: POST /workflows/{workflowId}/invoke with {}
         endpoint = f"{self._api_url}/workflows/{workflow_id}/invoke"
         headers = {
@@ -256,6 +295,16 @@ def resolve_lark_adapter_for_mode(mode: str) -> LarkAdapterSelection:
             preamble_notes=["Adapter selected: getlark_cli_scaffold"],
         )
 
+    if mode == "getlark_cli_live" and getlark_credentials_complete():
+        return LarkAdapterSelection(
+            adapter=GetLarkCliLiveAdapter(
+                api_key=GETLARK_API_KEY,
+                api_url=GETLARK_API_URL,
+            ),
+            adapter_id="getlark_cli_live",
+            preamble_notes=["Adapter selected: getlark_cli_live"],
+        )
+
     if mode == "getlark_live_check" and getlark_credentials_complete():
         return LarkAdapterSelection(
             adapter=GetLarkLiveCheckAdapter(
@@ -266,7 +315,7 @@ def resolve_lark_adapter_for_mode(mode: str) -> LarkAdapterSelection:
             preamble_notes=["Adapter selected: getlark_live_check"],
         )
 
-    if mode in ("getlark_mcp", "getlark_cli", "getlark_live_check"):
+    if mode in ("getlark_mcp", "getlark_cli", "getlark_cli_live", "getlark_live_check"):
         return LarkAdapterSelection(
             adapter=FakeLarkAdapter(),
             adapter_id="fake",
@@ -416,13 +465,14 @@ class GetLarkLiveCheckAdapter(LarkAdapter):
         if (
             GETLARK_ENABLE_WORKFLOW_INVOKE
             and plan.mode == PlanMode.LARK_WORKFLOW_CANDIDATE
-            and listing.workflow_ids
+            and listing.workflow_refs
         ):
             invoke = self._client.invoke_workflow_best_effort(
                 plan=plan,
                 issue=issue,
-                workflow_ids=listing.workflow_ids,
+                workflow_refs=listing.workflow_refs,
             )
+        cli_list = run_getlark_cli_list_best_effort() if GETLARK_ENABLE_CLI_LIVE else None
         status = resolve_execution_status(plan, brief)
         if invoke is not None and invoke.success and status == ResultStatus.SIMULATED:
             # Live invoke proof should surface as reproduced in demo output.
@@ -495,6 +545,28 @@ class GetLarkLiveCheckAdapter(LarkAdapter):
                 extra_notes.append(
                     "Lark workflow invoke attempt failed; retained non-breaking live-check flow."
                 )
+        if cli_list is not None:
+            evidence.append(
+                ExecutionArtifact(
+                    kind=ArtifactKind.LOG,
+                    label="cli_workflows_list",
+                    content=cli_list.summary,
+                )
+            )
+            if cli_list.stdout_snippet:
+                evidence.append(
+                    ExecutionArtifact(
+                        kind=ArtifactKind.TRACE,
+                        label="cli_stdout",
+                        content=cli_list.stdout_snippet,
+                    )
+                )
+            if cli_list.success:
+                extra_notes.append(f"Real getlark CLI list succeeded: {cli_list.command}")
+            elif cli_list.attempted:
+                extra_notes.append(
+                    "getlark CLI workflows list attempted; see cli_workflows_list evidence."
+                )
 
         return VerificationResult(
             status=status,
@@ -536,6 +608,81 @@ class GetLarkLiveCheckAdapter(LarkAdapter):
                         "Bug reproduction was not executed live."
                     )
                 ),
+            ),
+        )
+
+
+class GetLarkCliLiveAdapter(LarkAdapter):
+    """Live getlark CLI integration: runs `getlark workflows list` and captures stdout as evidence."""
+
+    adapter_id = "getlark_cli_live"
+
+    def __init__(self, api_key: str, api_url: str) -> None:
+        self._api_key = api_key
+        self._api_url = api_url.rstrip("/")
+
+    def execute(
+        self,
+        plan: VerificationPlan,
+        brief: VerificationBrief,
+        issue: IssueSummary,
+    ) -> VerificationResult:
+        cli_list = run_getlark_cli_list(api_key=self._api_key, api_url=self._api_url)
+        if not cli_list.success:
+            raise LiveCheckFailedError(cli_list.summary)
+
+        status = resolve_execution_status(plan, brief)
+        title = issue.title.strip() or f"Issue #{issue.number}"
+        evidence = [
+            ExecutionArtifact(
+                kind=ArtifactKind.LOG,
+                label="cli_workflows_list",
+                content=cli_list.summary,
+            ),
+            ExecutionArtifact(
+                kind=ArtifactKind.TRACE,
+                label="cli_stdout",
+                content=cli_list.stdout_snippet,
+            ),
+            ExecutionArtifact(
+                kind=ArtifactKind.NOTE,
+                label="lark_mode",
+                content="live REST + CLI scaffold; this run used real getlark CLI list",
+            ),
+        ]
+        if cli_list.stderr_snippet:
+            evidence.append(
+                ExecutionArtifact(
+                    kind=ArtifactKind.NOTE,
+                    label="cli_stderr",
+                    content=cli_list.stderr_snippet,
+                )
+            )
+
+        return VerificationResult(
+            status=status,
+            outcome_summary=(
+                f"{title}: getlark CLI workflows list succeeded via `{cli_list.command}`; "
+                "live CLI proof captured (not target-app reproduction)."
+            ),
+            evidence=evidence,
+            execution_notes=execution_notes(
+                plan,
+                brief,
+                status,
+                adapter_label="getlark_cli_live",
+                extra=[
+                    f"Real getlark CLI call: {cli_list.command}",
+                    "CLI stdout captured as verification evidence",
+                ],
+            ),
+            resilience_notes=[
+                "No resilience gateway configured yet",
+                "No fallback path executed in this run",
+            ],
+            confidence=BriefConfidence(
+                level=ConfidenceLevel.MEDIUM,
+                reason="Real getlark CLI workflows list succeeded; bug reproduction was not executed live.",
             ),
         )
 
@@ -901,7 +1048,115 @@ def _summarize_workflow_list(payload: Any) -> tuple[int, str]:
     return len(items), f"{len(items)} workflow(s) returned"
 
 
-def _extract_workflow_ids(payload: Any) -> list[str]:
+def pick_workflow_id(
+    workflow_refs: list[GetLarkWorkflowRef],
+    *,
+    workflow_id: str | None,
+    workflow_name: str | None,
+) -> str | None:
+    """Select a workflow id for invoke using env overrides, then first listed workflow."""
+    if workflow_id:
+        for ref in workflow_refs:
+            if ref.workflow_id == workflow_id:
+                return ref.workflow_id
+        return workflow_id
+    if workflow_name:
+        for ref in workflow_refs:
+            if ref.name and ref.name == workflow_name:
+                return ref.workflow_id
+    if workflow_refs:
+        return workflow_refs[0].workflow_id
+    return None
+
+
+def run_getlark_cli_list_best_effort() -> GetLarkCliListResult:
+    """Best-effort CLI list for combined REST+CLI sponsor demos; never raises."""
+    return run_getlark_cli_list(
+        api_key=GETLARK_API_KEY,
+        api_url=GETLARK_API_URL,
+        raise_on_missing=False,
+    )
+
+
+def run_getlark_cli_list(
+    *,
+    api_key: str,
+    api_url: str,
+    cli_bin: str = GETLARK_CLI_BIN,
+    timeout_seconds: float = GETLARK_TIMEOUT_SECONDS,
+    raise_on_missing: bool = True,
+) -> GetLarkCliListResult:
+    """Run `getlark workflows list` and capture stdout/stderr as sponsor evidence."""
+    command = f"{cli_bin} workflows list"
+    argv = [cli_bin, "workflows", "list"]
+    env = os.environ.copy()
+    env["GETLARK_API_KEY"] = api_key
+    env["GETLARK_API_URL"] = api_url.rstrip("/")
+    try:
+        proc = subprocess.run(
+            argv,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
+            env=env,
+            check=False,
+        )
+    except FileNotFoundError:
+        summary = (
+            f"getlark CLI not found (`{cli_bin}`). Install @getlark/cli or set GETLARK_CLI_BIN."
+        )
+        if raise_on_missing:
+            return GetLarkCliListResult(
+                attempted=True,
+                command=command,
+                exit_code=None,
+                success=False,
+                summary=summary,
+                stdout_snippet="",
+                stderr_snippet=summary,
+            )
+        return GetLarkCliListResult(
+            attempted=True,
+            command=command,
+            exit_code=None,
+            success=False,
+            summary=summary,
+            stdout_snippet="",
+            stderr_snippet=summary,
+        )
+    except subprocess.TimeoutExpired:
+        summary = f"getlark CLI timed out after {timeout_seconds}s: {command}"
+        return GetLarkCliListResult(
+            attempted=True,
+            command=command,
+            exit_code=None,
+            success=False,
+            summary=summary,
+            stdout_snippet="",
+            stderr_snippet=summary,
+        )
+
+    stdout = proc.stdout or ""
+    stderr = proc.stderr or ""
+    success = proc.returncode == 0
+    if success:
+        summary = f"getlark CLI workflows list succeeded (exit 0): {command}"
+    else:
+        summary = (
+            f"getlark CLI workflows list failed (exit {proc.returncode}): {command}"
+        )
+    return GetLarkCliListResult(
+        attempted=True,
+        command=command,
+        exit_code=proc.returncode,
+        success=success,
+        summary=summary,
+        stdout_snippet=stdout[:1200],
+        stderr_snippet=stderr[:400],
+    )
+
+
+def _extract_workflow_refs(payload: Any) -> list[GetLarkWorkflowRef]:
     items: list[Any]
     if isinstance(payload, list):
         items = payload
@@ -911,14 +1166,25 @@ def _extract_workflow_ids(payload: Any) -> list[str]:
     else:
         return []
 
-    ids: list[str] = []
+    refs: list[GetLarkWorkflowRef] = []
     for item in items:
         if not isinstance(item, dict):
             continue
-        value = item.get("id") or item.get("workflow_id") or item.get("name")
-        if value:
-            ids.append(str(value))
-    return ids
+        workflow_id = item.get("id") or item.get("workflow_id")
+        if not workflow_id:
+            continue
+        name = item.get("name")
+        refs.append(
+            GetLarkWorkflowRef(
+                workflow_id=str(workflow_id),
+                name=str(name) if name else None,
+            )
+        )
+    return refs
+
+
+def _extract_workflow_ids(payload: Any) -> list[str]:
+    return [ref.workflow_id for ref in _extract_workflow_refs(payload)]
 
 
 def _extract_execution_id(response: httpx.Response) -> str | None:

@@ -7,6 +7,7 @@ import httpx
 
 from src.config import COMMENT_ONLY_ON_COMPLETED, ENABLE_GITHUB_COMMENTS, fault_injection_mode
 from src.models import CommentSummary, ResultStatus, RunStatus, VerificationResult, VerifyResponse
+from src.run_health import run_comment_headline
 
 LARKGUARD_MANAGED_MARKER = "<!-- larkguard:managed -->"
 LARKGUARD_RUN_MARKER = "<!-- larkguard-run:"
@@ -66,6 +67,12 @@ def render_verification_comment(response: VerifyResponse) -> str:
     status_label = _render_status_label(result, response)
     workflow = plan.workflow_name if plan else "unknown"
     adapter = response.adapter_used or "unknown"
+    execution_id_artifact = None
+    if result.evidence:
+        execution_id_artifact = next(
+            (artifact for artifact in result.evidence if artifact.label == "execution_id"),
+            None,
+        )
 
     lines: list[str] = [
         LARKGUARD_MANAGED_MARKER,
@@ -75,33 +82,43 @@ def render_verification_comment(response: VerifyResponse) -> str:
         "",
     ]
 
-    banner = _demo_banner(response)
-    if banner:
-        lines.extend([banner, ""])
+    headline = _comment_headline(response)
+    if headline:
+        lines.extend([headline, ""])
 
-    lines.extend(
+    status_lines = [f"- **Status:** {status_label}"]
+    if execution_id_artifact is not None:
+        status_lines.append(f"- **Execution proof:** `{execution_id_artifact.content}`")
+    if response.primary_adapter_requested:
+        status_lines.append(
+            f"- **Primary requested:** `{response.primary_adapter_requested}`"
+        )
+    status_lines.extend(
         [
-            f"- **Status:** {status_label}",
             f"- **Workflow:** `{workflow}`",
             f"- **Adapter:** `{adapter}`",
             f"- **Run ID:** `{response.run_id}`",
         ]
     )
+    lines.extend(status_lines)
+
+    if response.parser_used and response.parser_fallback_triggered:
+        lines.append(f"- **Parser:** `{response.parser_used}`")
+        lines.append(
+            f"- **Parser fallback:** yes (`{response.parser_requested}` → "
+            f"`{response.parser_used}`)"
+        )
     if response.adapter_used and response.adapter_used.startswith("getlark"):
         lines.append("- **Execution engine:** Powered by [getlark.ai](https://getlark.ai)")
+        lines.append(f"- **Lark mode:** {_lark_mode_label(response.adapter_used)}")
     if response.parser_used == "truefoundry_gateway":
         lines.append("- **Parser engine:** Powered by [TrueFoundry AI Gateway](https://www.truefoundry.com)")
     if response.fallback_triggered:
         lines.append(
             f"- **Fallback:** yes (`{response.primary_adapter_requested}` → `{adapter}`)"
         )
-    if response.parser_used:
+    if response.parser_used and not response.parser_fallback_triggered:
         lines.append(f"- **Parser:** `{response.parser_used}`")
-        if response.parser_fallback_triggered:
-            lines.append(
-                f"- **Parser fallback:** yes (`{response.parser_requested}` → "
-                f"`{response.parser_used}`)"
-            )
     if response.parser_duration_ms is not None or response.adapter_duration_ms is not None:
         parts: list[str] = []
         if response.parser_duration_ms is not None:
@@ -111,12 +128,7 @@ def render_verification_comment(response: VerifyResponse) -> str:
         lines.append(f"- **Timings:** {', '.join(parts)}")
 
     lines.extend(["", result.outcome_summary, "", "**Evidence**"])
-    execution_id_artifact = None
     if result.evidence:
-        execution_id_artifact = next(
-            (artifact for artifact in result.evidence if artifact.label == "execution_id"),
-            None,
-        )
         shown = result.evidence[:4]
         shown_labels = {artifact.label for artifact in shown}
         if execution_id_artifact is not None and execution_id_artifact.label not in shown_labels:
@@ -156,17 +168,25 @@ def render_verification_comment(response: VerifyResponse) -> str:
     return "\n".join(lines)
 
 
-def _demo_banner(response: VerifyResponse) -> str:
+def _comment_headline(response: VerifyResponse) -> str | None:
     if response.fallback_triggered and fault_injection_mode() == "force_adapter_failure":
         return (
             "> **Degraded run** — primary adapter failure was simulated; "
-            "completed via **fake** fallback."
+            "completed via **resilient fallback executor**."
         )
     if fault_injection_mode() == "force_fallback_note":
         return "> **Demo note** — resilience degradation simulated for demonstration."
-    if response.fallback_triggered:
-        return "> **Degraded run** — fell back to fake adapter to complete verification."
-    return ""
+    return run_comment_headline(response)
+
+
+def _lark_mode_label(adapter_used: str) -> str:
+    labels = {
+        "getlark_mcp_scaffold": "scaffold MCP",
+        "getlark_cli_scaffold": "scaffold CLI",
+        "getlark_cli_live": "live CLI (`workflows list`)",
+        "getlark_live_check": "live REST (list + optional invoke)",
+    }
+    return labels.get(adapter_used, adapter_used)
 
 
 def _status_label(status: ResultStatus) -> str:

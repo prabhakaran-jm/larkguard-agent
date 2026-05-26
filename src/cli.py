@@ -12,6 +12,7 @@ from rich.panel import Panel
 from rich.table import Table
 
 from src.models import ReplayRequest, VerifyRequest, VerifyResponse
+from src.run_health import compute_run_health, format_health_summary_line
 from src.service import ServiceError, VerificationService
 
 console = Console()
@@ -90,10 +91,21 @@ def main() -> None:
         help="API base URL when not using --local",
     )
 
+    verify_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print full VerifyResponse JSON after the summary",
+    )
+
     replay_parser = subparsers.add_parser("replay", help="Replay a stored run")
     replay_parser.add_argument("--run-id", type=str, required=True)
     replay_parser.add_argument("--local", action="store_true")
     replay_parser.add_argument("--api-base", type=str, default=DEFAULT_API_BASE)
+    replay_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print full VerifyResponse JSON after the summary",
+    )
 
     runs_parser = subparsers.add_parser("runs", help="List recent runs")
     runs_parser.add_argument("--local", action="store_true")
@@ -170,7 +182,8 @@ def _run_verify(args: argparse.Namespace) -> None:
         result = VerifyResponse.model_validate(response.json())
 
     _print_verify_summary(result)
-    console.print_json(data=result.model_dump(mode="json"))
+    if args.json:
+        console.print_json(data=result.model_dump(mode="json"))
 
 
 def _run_replay(args: argparse.Namespace) -> None:
@@ -187,11 +200,13 @@ def _run_replay(args: argparse.Namespace) -> None:
 
     console.print(f"[green]Replay complete[/green] — run_id={result.run_id}")
     _print_verify_summary(result)
-    console.print_json(data=result.model_dump(mode="json"))
+    if args.json:
+        console.print_json(data=result.model_dump(mode="json"))
 
 
 def _print_verify_summary(result: VerifyResponse) -> None:
     console.print(f"[green]Verification complete[/green] — run_id={result.run_id}")
+    console.print(f"[bold cyan]{format_health_summary_line(result)}[/bold cyan]")
     if result.verification_result:
         status = result.verification_result.status.value
         workflow = (
@@ -203,6 +218,9 @@ def _print_verify_summary(result: VerifyResponse) -> None:
             f"[bold]Result:[/bold] {status} · workflow `{workflow}` · "
             f"adapter `{result.adapter_used or 'unknown'}`"
         )
+        execution_id = _execution_id_from_result(result)
+        if execution_id:
+            console.print(f"[bold green]Execution proof:[/bold green] `{execution_id}`")
         if result.fallback_triggered:
             console.print(
                 "[yellow]Degraded:[/yellow] fallback from "
@@ -282,6 +300,15 @@ def _run_demo_summary(args: argparse.Namespace) -> None:
     console.print(_render_demo_summary(result))
 
 
+def _execution_id_from_result(result: VerifyResponse) -> str | None:
+    if result.verification_result is None or not result.verification_result.evidence:
+        return None
+    for artifact in result.verification_result.evidence:
+        if artifact.label == "execution_id":
+            return artifact.content.split()[0]
+    return None
+
+
 def _render_demo_summary(result: VerifyResponse) -> str:
     status = result.verification_result.status.value if result.verification_result else result.status.value
     workflow = result.verification_plan.workflow_name if result.verification_plan else "unknown"
@@ -295,16 +322,24 @@ def _render_demo_summary(result: VerifyResponse) -> str:
     if result.adapter_duration_ms is not None:
         timing.append(f"adapter={result.adapter_duration_ms}ms")
     timing_text = ", ".join(timing) if timing else "n/a"
+    execution_id = _execution_id_from_result(result)
 
     lines = [
         f"# LarkGuard Demo Summary ({result.run_id})",
         "",
+        f"- {format_health_summary_line(result)}",
         f"- Status: **{status}**",
-        f"- Workflow: `{workflow}`",
-        f"- Adapter: `{adapter}` (fallback: {fallback})",
-        f"- Parser: `{parser}` (fallback: {parser_fallback})",
-        f"- Timings: {timing_text}",
     ]
+    if execution_id:
+        lines.append(f"- Execution proof: `{execution_id}`")
+    lines.extend(
+        [
+            f"- Workflow: `{workflow}`",
+            f"- Adapter: `{adapter}` (fallback: {fallback})",
+            f"- Parser: `{parser}` (fallback: {parser_fallback})",
+            f"- Timings: {timing_text}",
+        ]
+    )
     if result.github_comment_url:
         lines.append(f"- Managed comment: {result.github_comment_url}")
     if result.verification_result and result.verification_result.evidence:

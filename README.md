@@ -2,7 +2,7 @@
 
 Turn messy GitHub bug reports into proof — reproduced, not reproduced, or blocked — with evidence and graceful fallback when agent infrastructure fails.
 
-**Sponsor integration:** [getlark.ai](https://getlark.ai) (testing workflows via CLI/MCP)
+**Sponsor integration:** [getlark.ai](https://getlark.ai) — **live REST + optional CLI today**; MCP/CLI scaffolds for workflow planning. [TrueFoundry AI Gateway](https://www.truefoundry.com) — optional structured parser with deterministic fallback.
 
 ## Why this matters
 
@@ -117,7 +117,8 @@ This makes the demo flow visible: **plan → execute → result**, with statuses
 | `fake` (default) | `LARK_MODE=fake` or unset | Reliable simulated execution |
 | `getlark_mcp` | `LARK_MODE=getlark_mcp` + `GETLARK_API_KEY` | Scaffold describes MCP workflow at `api.getlark.ai/mcp`; **no HTTP calls** |
 | `getlark_cli` | `LARK_MODE=getlark_cli` + `GETLARK_API_KEY` | Scaffold shows `getlark workflows create/invoke` commands; **no subprocess** |
-| `getlark_live_check` | `LARK_MODE=getlark_live_check` + `GETLARK_API_KEY` | **Real HTTP** `GET /workflows`; optional best-effort `POST /workflows/invoke` when enabled |
+| `getlark_cli_live` | `LARK_MODE=getlark_cli_live` + `GETLARK_API_KEY` | **Real CLI** — runs `getlark workflows list`, captures stdout as evidence |
+| `getlark_live_check` | `LARK_MODE=getlark_live_check` + `GETLARK_API_KEY` | **Real HTTP** `GET /workflows`; optional `POST /workflows/{id}/invoke` when enabled |
 | Missing API key | mode set, no `GETLARK_API_KEY` | **Falls back to fake** with a note in `verification_result` |
 
 ### Thin real getlark mode (`getlark_live_check`)
@@ -140,6 +141,10 @@ PRIMARY_ADAPTER_MODE=getlark_live_check
 GETLARK_STRICT_MODE=false    # true = fail verify on live API error (no fake fallback)
 GETLARK_TIMEOUT_SECONDS=15
 GETLARK_ENABLE_WORKFLOW_INVOKE=false  # true = attempt one real workflow invoke after list
+GETLARK_WORKFLOW_NAME=larkguard-smoke # optional: pick workflow by name for invoke
+# GETLARK_WORKFLOW_ID=wflw_...       # optional: pick workflow by id (overrides name)
+GETLARK_ENABLE_CLI_LIVE=false        # true = also run `getlark workflows list` on live_check runs
+GETLARK_CLI_BIN=getlark              # path to @getlark/cli binary
 ```
 
 **What counts as a “real call”:** A successful `GET /workflows` with HTTP 2xx and JSON parsed into `verification_result.evidence` (`live_api`, `workflows`, `api_response` artifacts). If `GETLARK_ENABLE_WORKFLOW_INVOKE=true`, LarkGuard also attempts `POST /workflows/{workflow_id}/invoke` and stores invoke evidence (`invoke_attempt`, `invoke_response`, `execution_id`).
@@ -153,11 +158,11 @@ FAULT_INJECTION_MODE=none PRIMARY_ADAPTER_MODE=getlark_live_check \
   python -m src.cli verify --issue-number 2 --local
 ```
 
-**Success output (CLI):** `adapter_used: getlark_live_check`, `fallback_triggered: false`, result mentions “getlark live check succeeded”.
+**Success output (CLI):** compact summary with `Health=healthy`, `adapter: getlark_live_check`, optional `Execution proof: wflw_exec_…`. Add `--json` for full payload.
 
-**Fallback output:** `adapter_used: fake`, `fallback_triggered: true`, execution notes start with `getlark_live_check failed: …`.
+**Fallback output:** `adapter_used: fake`, `fallback_triggered: true`, `Health=degraded-adapter`.
 
-**Current limitation:** No workflow create/invoke yet — scaffold modes and fake execution still handle the demo path.
+**If invoke fails:** same command with `GETLARK_ENABLE_WORKFLOW_INVOKE=false` — still completes with live list + `status: simulated`.
 
 **`.env` for getlark scaffold:**
 
@@ -171,7 +176,21 @@ Get your API key: [getlark.ai](https://getlark.ai) → Settings → API Keys. Do
 
 **Why fallback is intentional:** Demos should not fail without credentials. `execution_notes` always shows which adapter ran.
 
-**Current limitation:** MCP/CLI scaffolds do not call the API. `getlark_live_check` is the thin real path; invoke is best-effort and does not yet execute full end-to-end bug reproduction.
+### Why this still fits Lark (CLI/MCP sponsor track)
+
+LarkGuard is built around **getlark workflows as the execution surface**:
+
+- **Planning layer** — verification plans and workflow descriptions are shaped for MCP/CLI create + invoke (scaffold adapters show the intended `@getlark/cli` commands).
+- **Live REST today** — `getlark_live_check` proves credentials, lists workflows, and optionally invokes one (`execution_id` captured).
+- **Live CLI today** — `getlark_cli_live` runs real `getlark workflows list` and stores stdout as evidence; set `GETLARK_ENABLE_CLI_LIVE=true` on REST runs for combined proof.
+- **Next step** — wire full MCP tool calls and `getlark workflows invoke --wait` for target-app reproduction.
+
+**Lark CLI-only demo:**
+
+```bash
+PRIMARY_ADAPTER_MODE=getlark_cli_live FAULT_INJECTION_MODE=none \
+  python -m src.cli verify --issue-number 2 --local
+```
 
 ## GitHub comments & fault injection (Step 5)
 
@@ -181,7 +200,7 @@ Post a markdown verification summary back to the GitHub issue (requires token sc
 ENABLE_GITHUB_COMMENTS=true
 COMMENT_ONLY_ON_COMPLETED=true
 
-PRIMARY_ADAPTER_MODE=fake          # or getlark_mcp / getlark_cli / getlark_live_check
+PRIMARY_ADAPTER_MODE=fake          # or getlark_mcp / getlark_cli / getlark_cli_live / getlark_live_check
 FAULT_INJECTION_MODE=none          # none | force_adapter_failure | force_fallback_note
 ```
 
@@ -246,23 +265,41 @@ Full-stack path for judges: TrueFoundry gateway parser + live getlark list/invok
 ```bash
 PRIMARY_ADAPTER_MODE=getlark_live_check \
 GETLARK_ENABLE_WORKFLOW_INVOKE=true \
+GETLARK_ENABLE_CLI_LIVE=true \
+GETLARK_WORKFLOW_NAME=larkguard-smoke \
 PARSER_MODE=truefoundry_gateway \
 FAULT_INJECTION_MODE=none \
 python -m src.cli verify --issue-number 2 --local
 ```
 
+**Judge-friendly replay** (after a run completes):
+
+```bash
+python -m src.cli demo-summary --run-id <run_id> --local
+```
+
 **Expected highlights (CLI summary):**
 
 ```
+Health=healthy · Lark=getlark_live_check · Parser=truefoundry_gateway
 Result: reproduced · workflow `github_issue_verification` · adapter `getlark_live_check`
-Status: **reproduced**
-Parser: truefoundry_gateway
-Evidence includes execution_id: wflw_exec_…
+Execution proof: `wflw_exec_…`
 ```
 
 The managed GitHub comment shows **Status: Reproduced (live getlark workflow execution proof — not target-app reproduction)** when invoke succeeds — proof that a real getlark workflow ran, not that the issue's app bug was reproduced end-to-end.
 
 Without `GETLARK_ENABLE_WORKFLOW_INVOKE=true`, the same command completes with `status: simulated` (list-only live check).
+
+### Demo assets (screenshots / video)
+
+Capture these for Devpost:
+
+1. **CLI** — `demo-summary` showing `Health=healthy`, `Execution proof`, timings.
+2. **GitHub comment** — managed comment with **Live sponsor run** banner and honest Reproduced qualifier.
+3. **Degraded run** — `FAULT_INJECTION_MODE=force_adapter_failure` showing fallback banner.
+4. **Run store** — `.larkguard_runs/` + `python -m src.cli replay --run-id … --local`.
+
+Do not screenshot private repo issues or tokens. Never commit `.env` or run JSON with secrets.
 
 ## Quickstart
 
@@ -283,6 +320,7 @@ uvicorn src.main:app --reload
 
 # 5. In another terminal, verify an issue (uses env defaults if owner/repo omitted)
 python -m src.cli verify --issue-number 1 --local
+# Add --json only when you need the full VerifyResponse payload
 
 # Or call the API directly
 curl -X POST http://127.0.0.1:8000/verify \
@@ -314,6 +352,14 @@ Omit `--local` to call the running API instead (default `http://127.0.0.1:8000`)
 | POST | `/verify` | Fetch and normalize a GitHub issue |
 | POST | `/replay` | Return stored result or re-run |
 | GET | `/runs` | List recent run summaries |
+
+### TrueFoundry resilience demo pair
+
+**Gateway success** — `PARSER_MODE=truefoundry_gateway` with valid credentials → `Health=healthy`, parser `truefoundry_gateway`.
+
+**Gateway fallback** — unset `TRUEFOUNDRY_API_KEY` (strict off) → `Health=degraded-parser`, parser falls back to `deterministic`, resilience notes explain why.
+
+TrueFoundry powers structured interpretation; deterministic fallback keeps the workflow alive.
 
 ## Planned next steps
 

@@ -307,7 +307,7 @@ class VerificationService:
             fallback_triggered = (
                 adapter_used == "fake"
                 and primary_requested
-                in ("getlark_mcp", "getlark_cli", "getlark_live_check")
+                in ("getlark_mcp", "getlark_cli", "getlark_cli_live", "getlark_live_check")
             )
         result = apply_adapter_run_metadata(
             result,

@@ -10,8 +10,11 @@ from src.lark_adapter import (
     GetLarkInvokeResult,
     GetLarkLiveCheckAdapter,
     GetLarkWorkflowListResult,
+    GetLarkWorkflowRef,
+    pick_workflow_id,
     resolve_execution_status,
 )
+from src.run_health import compute_run_health, format_health_summary_line
 from src.models import (
     ArtifactKind,
     BriefClassification,
@@ -102,6 +105,7 @@ def test_live_check_marks_reproduced_when_invoke_succeeds(monkeypatch) -> None:
         summary="1 workflow(s); examples: larkguard-smoke",
         response_snippet='{"workflows":[{"id":"wflw_123","name":"larkguard-smoke"}]}',
         workflow_ids=["wflw_123"],
+        workflow_refs=[GetLarkWorkflowRef(workflow_id="wflw_123", name="larkguard-smoke")],
     )
     adapter._client.invoke_workflow_best_effort = (  # type: ignore[method-assign]
         lambda **kwargs: GetLarkInvokeResult(
@@ -162,6 +166,7 @@ def test_comment_includes_sponsor_lines_for_live_parser_and_adapter() -> None:
         verification_plan=_plan(),
         verification_result=result,
         adapter_used="getlark_live_check",
+        primary_adapter_requested="getlark_live_check",
         parser_used="truefoundry_gateway",
     )
 
@@ -169,3 +174,82 @@ def test_comment_includes_sponsor_lines_for_live_parser_and_adapter() -> None:
     assert "Powered by [getlark.ai]" in comment
     assert "Powered by [TrueFoundry AI Gateway]" in comment
     assert "live getlark workflow execution proof" in comment
+    assert "**Primary requested:** `getlark_live_check`" in comment
+    assert "**Live sponsor run**" in comment
+
+
+def test_pick_workflow_id_prefers_env_name() -> None:
+    refs = [
+        GetLarkWorkflowRef(workflow_id="wflw_a", name="other"),
+        GetLarkWorkflowRef(workflow_id="wflw_b", name="larkguard-smoke"),
+    ]
+    picked = pick_workflow_id(
+        refs,
+        workflow_id=None,
+        workflow_name="larkguard-smoke",
+    )
+    assert picked == "wflw_b"
+
+
+def test_pick_workflow_id_prefers_env_id() -> None:
+    refs = [
+        GetLarkWorkflowRef(workflow_id="wflw_a", name="alpha"),
+        GetLarkWorkflowRef(workflow_id="wflw_b", name="beta"),
+    ]
+    picked = pick_workflow_id(refs, workflow_id="wflw_b", workflow_name=None)
+    assert picked == "wflw_b"
+
+
+def test_getlark_cli_live_adapter_captures_cli_stdout(monkeypatch) -> None:
+    from src.lark_adapter import GetLarkCliListResult, GetLarkCliLiveAdapter
+
+    monkeypatch.setattr(
+        "src.lark_adapter.run_getlark_cli_list",
+        lambda **kwargs: GetLarkCliListResult(
+            attempted=True,
+            command="getlark workflows list",
+            exit_code=0,
+            success=True,
+            summary="getlark CLI workflows list succeeded (exit 0): getlark workflows list",
+            stdout_snippet='{"workflows":[{"id":"wflw_123","name":"larkguard-smoke"}]}',
+            stderr_snippet="",
+        ),
+    )
+    adapter = GetLarkCliLiveAdapter(api_key="key", api_url="https://api.getlark.ai")
+    result = adapter.execute(_plan(), _brief(), _issue())
+    assert result.status == ResultStatus.SIMULATED
+    assert any(item.label == "cli_stdout" for item in result.evidence)
+
+
+def test_health_summary_line_is_compact() -> None:
+    response = VerifyResponse(
+        run_id="abc123def456",
+        status=RunStatus.COMPLETED,
+        issue=_issue(),
+        comments=[],
+        evidence_packet={
+            "problem_statement": "x",
+            "raw_report_text": "x",
+            "report_quality_hints": {
+                "has_body": True,
+                "has_repro_signals": True,
+                "comment_count": 0,
+                "label_count": 0,
+            },
+            "combined_text": "x",
+        },
+        verification_brief=_brief(),
+        verification_plan=_plan(),
+        verification_result=VerificationResult(
+            status=ResultStatus.REPRODUCED,
+            outcome_summary="ok",
+            evidence=[],
+            execution_notes=[],
+            resilience_notes=[],
+            confidence=BriefConfidence(level=ConfidenceLevel.HIGH, reason="ok"),
+        ),
+        adapter_used="getlark_live_check",
+        parser_used="truefoundry_gateway",
+    )
+    assert compute_run_health(response) == "healthy"
+    assert "Health=healthy" in format_health_summary_line(response)

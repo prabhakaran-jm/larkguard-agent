@@ -1,6 +1,9 @@
 .env
+.env.*
+!.env.example
 .venv/
 __pycache__/
 *.pyc
 .larkguard_runs/
 .pytest_cache/
+DEVPOST.md

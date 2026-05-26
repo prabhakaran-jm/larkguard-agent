@@ -47,8 +47,18 @@ GETLARK_ENABLE_WORKFLOW_INVOKE = os.getenv("GETLARK_ENABLE_WORKFLOW_INVOKE", "fa
     "true",
     "yes",
 )
+GETLARK_WORKFLOW_NAME = os.getenv("GETLARK_WORKFLOW_NAME", "").strip() or None
+GETLARK_WORKFLOW_ID = os.getenv("GETLARK_WORKFLOW_ID", "").strip() or None
+GETLARK_CLI_BIN = os.getenv("GETLARK_CLI_BIN", "getlark").strip() or "getlark"
+GETLARK_ENABLE_CLI_LIVE = os.getenv("GETLARK_ENABLE_CLI_LIVE", "false").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+)
 
-_VALID_LARK_MODES = frozenset({"fake", "getlark_mcp", "getlark_cli", "getlark_live_check"})
+_VALID_LARK_MODES = frozenset(
+    {"fake", "getlark_mcp", "getlark_cli", "getlark_cli_live", "getlark_live_check"}
+)
 _VALID_FAULT_MODES = frozenset({"none", "force_adapter_failure", "force_fallback_note"})
 _MODE_ALIASES = {"openapi_mcp": "getlark_mcp"}
 
