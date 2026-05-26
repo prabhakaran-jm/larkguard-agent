@@ -6,15 +6,33 @@ Turn messy GitHub bug reports into proof — reproduced, not reproduced, or bloc
 
 Bug reports are noisy. Maintainers waste time guessing whether an issue is actionable. LarkGuard starts with evidence: fetch the issue, normalize it into a proof-oriented packet, and leave a replayable trail for verification agents to build on.
 
-## Current MVP scope (Step 1)
+## Current MVP scope
 
+**Step 1**
 - Manual verification trigger (API + CLI)
 - GitHub issue + comments fetch via REST API
 - Normalized evidence packet for downstream parsing
 - Local JSON run storage for replay/debug
-- Modular layout ready for Lark adapter and resilience layers
+
+**Step 2**
+- Deterministic parser → structured `verification_brief`
+- Rule-based classification, confidence, and verification mode
+- Parser interface ready for a future LLM-backed implementation
 
 **Not yet:** Lark MCP integration, LLM parsing, resilience/fault injection, GitHub comment posting, auth, database, or webhooks.
+
+## Parser (Step 2)
+
+After fetching an issue, LarkGuard runs a **deterministic parser** over the evidence packet and returns a `verification_brief` with:
+
+- Summary and classification (`reproducible_candidate`, `blocked_missing_info`, `unclear`)
+- Extracted reproduction steps, expected/actual behavior
+- Missing-information checklist and signal flags
+- Rule-based confidence and recommended mode (`manual_review` vs `lark_workflow_candidate`)
+
+**Why deterministic first?** It is fast, reproducible, and demo-friendly — the same issue always yields the same brief. That makes debugging and judging easier before we add LLM variability.
+
+**Next:** `LLMParser` behind the same interface, then Lark workflow execution using the brief as input.
 
 ## Quickstart
 
@@ -67,9 +85,9 @@ Omit `--local` to call the running API instead (default `http://127.0.0.1:8000`)
 
 ## Planned next steps
 
-- **Lark integration** — MCP/CLI adapter for agent-driven verification workflows
-- **Evidence parser** — LLM-assisted extraction of repro steps and expected behavior
-- **Resilience/fallback layer** — graceful degradation when MCP or LLM providers fail
+- **LLM parser** — swap in behind the same `Parser` interface for ambiguous reports
+- **Lark integration** — MCP/CLI adapter driven by `verification_brief`
+- **Resilience/fallback layer** — parser chain + graceful degradation when MCP or LLM fails
 - **GitHub comment posting** — publish verification evidence back to the issue
 
 ## Project layout
@@ -78,6 +96,7 @@ Omit `--local` to call the running API instead (default `http://127.0.0.1:8000`)
 src/
   main.py           # FastAPI routes
   service.py        # Orchestration
+  parser.py         # Deterministic verification brief parser
   github_client.py  # GitHub REST client
   run_store.py      # Local JSON persistence
   models.py         # Pydantic schemas

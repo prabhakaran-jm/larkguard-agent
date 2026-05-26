@@ -24,9 +24,9 @@ from src.models import (
     VerifyRequest,
     VerifyResponse,
 )
+from src.parser import Parser, default_parser
 from src.run_store import RunNotFoundError, RunStore
 
-# TODO: parser module — extract structured repro steps from evidence_packet.combined_text
 # TODO: lark_adapter module — invoke Lark CLI/MCP for agent workflows
 # TODO: resilience_gateway module — route LLM/MCP calls with graceful fallback
 # TODO: fault_injection module — simulate MCP/LLM outages for demo/resilience testing
@@ -58,9 +58,11 @@ class VerificationService:
         self,
         run_store: RunStore | None = None,
         github_client: GitHubClient | None = None,
+        parser: Parser | None = None,
     ) -> None:
         self.run_store = run_store or RunStore()
         self._github_client = github_client
+        self._parser = parser or default_parser()
 
     def _resolve_github_client(self) -> GitHubClient:
         if self._github_client is not None:
@@ -150,7 +152,7 @@ class VerificationService:
             raise ServiceError(str(exc), error_type="run_not_found", status_code=404) from exc
 
         if run.normalized_payload is not None:
-            return run.normalized_payload
+            return self._ensure_verification_brief(run)
 
         if run.status == RunStatus.FAILED and run.error:
             raise ServiceError(
@@ -197,13 +199,27 @@ class VerificationService:
             combined_text=combined_text,
             recommended_next_step="parse_with_llm",
         )
+        brief = self._parser.parse(issue, comments, evidence)
         return VerifyResponse(
             run_id=run_id,
             status=RunStatus.COMPLETED,
             issue=issue,
             comments=comments,
             evidence_packet=evidence,
+            verification_brief=brief,
         )
+
+    def _ensure_verification_brief(self, run: StoredRun) -> VerifyResponse:
+        payload = run.normalized_payload
+        if payload is None:
+            raise ServiceError("Run has no stored payload", error_type="run_empty", status_code=409)
+        if payload.verification_brief is not None:
+            return payload
+        brief = self._parser.parse(payload.issue, payload.comments, payload.evidence_packet)
+        payload = payload.model_copy(update={"verification_brief": brief})
+        run.normalized_payload = payload
+        self.run_store.save(run)
+        return payload
 
     @staticmethod
     def _build_raw_report_text(issue: IssueSummary, comments: list[CommentSummary]) -> str:

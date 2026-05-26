@@ -76,12 +76,55 @@ class EvidencePacket(BaseModel):
     recommended_next_step: str = "parse_with_llm"
 
 
+class BriefClassification(str, Enum):
+    REPRODUCIBLE_CANDIDATE = "reproducible_candidate"
+    BLOCKED_MISSING_INFO = "blocked_missing_info"
+    UNCLEAR = "unclear"
+
+
+class ConfidenceLevel(str, Enum):
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+
+
+class VerificationMode(str, Enum):
+    MANUAL_REVIEW = "manual_review"
+    LARK_WORKFLOW_CANDIDATE = "lark_workflow_candidate"
+
+
+class BriefSignals(BaseModel):
+    has_numbered_steps: bool
+    has_expected_behavior: bool
+    has_actual_behavior: bool
+    has_error_message: bool
+    has_environment_details: bool
+
+
+class BriefConfidence(BaseModel):
+    level: ConfidenceLevel
+    reason: str
+
+
+class VerificationBrief(BaseModel):
+    summary: str
+    classification: BriefClassification
+    reproduction_steps: list[str]
+    expected_behavior: str
+    actual_behavior: str
+    missing_information: list[str]
+    signals: BriefSignals
+    confidence: BriefConfidence
+    recommended_verification_mode: VerificationMode
+
+
 class VerifyResponse(BaseModel):
     run_id: str
     status: RunStatus
     issue: IssueSummary
     comments: list[CommentSummary]
     evidence_packet: EvidencePacket
+    verification_brief: VerificationBrief | None = None
 
 
 class RunInputParams(BaseModel):
