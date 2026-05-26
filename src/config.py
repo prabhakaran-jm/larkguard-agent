@@ -42,6 +42,11 @@ try:
     GETLARK_TIMEOUT_SECONDS = float(os.getenv("GETLARK_TIMEOUT_SECONDS", "15"))
 except ValueError:
     GETLARK_TIMEOUT_SECONDS = 15.0
+GETLARK_ENABLE_WORKFLOW_INVOKE = os.getenv("GETLARK_ENABLE_WORKFLOW_INVOKE", "false").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+)
 
 _VALID_LARK_MODES = frozenset({"fake", "getlark_mcp", "getlark_cli", "getlark_live_check"})
 _VALID_FAULT_MODES = frozenset({"none", "force_adapter_failure", "force_fallback_note"})

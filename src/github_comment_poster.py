@@ -98,12 +98,41 @@ def render_verification_comment(response: VerifyResponse) -> str:
                 f"- **Parser fallback:** yes (`{response.parser_requested}` → "
                 f"`{response.parser_used}`)"
             )
+    if response.parser_duration_ms is not None or response.adapter_duration_ms is not None:
+        parts: list[str] = []
+        if response.parser_duration_ms is not None:
+            parts.append(f"parser {response.parser_duration_ms}ms")
+        if response.adapter_duration_ms is not None:
+            parts.append(f"adapter {response.adapter_duration_ms}ms")
+        lines.append(f"- **Timings:** {', '.join(parts)}")
 
     lines.extend(["", result.outcome_summary, "", "**Evidence**"])
+    execution_id_artifact = None
     if result.evidence:
-        for artifact in result.evidence[:4]:
+        execution_id_artifact = next(
+            (artifact for artifact in result.evidence if artifact.label == "execution_id"),
+            None,
+        )
+        shown = result.evidence[:4]
+        shown_labels = {artifact.label for artifact in shown}
+        if execution_id_artifact is not None and execution_id_artifact.label not in shown_labels:
+            shown = shown[:3] + [execution_id_artifact]
+        for artifact in shown:
             text = artifact.content if len(artifact.content) <= 120 else artifact.content[:117] + "..."
             lines.append(f"- `{artifact.label}`: {text}")
+        if execution_id_artifact is not None:
+            lines.append(f"- **Lark execution:** `{execution_id_artifact.content}`")
+        invoked = next(
+            (
+                artifact
+                for artifact in result.evidence
+                if artifact.label == "invoke_attempt"
+                and "invoked successfully" in artifact.content.lower()
+            ),
+            None,
+        )
+        if invoked is not None:
+            lines.append("- **Lark invoke:** workflow invoked successfully.")
     else:
         lines.append("- _(none)_")
 

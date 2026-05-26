@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import time
 from dataclasses import dataclass
 
 from src.config import (
@@ -37,8 +38,10 @@ from src.lark_adapter import (
     resolve_lark_adapter_for_mode,
 )
 from src.models import (
+    ArtifactKind,
     CommentSummary,
     EvidencePacket,
+    ExecutionArtifact,
     IssueSummary,
     ReportQualityHints,
     RunInputParams,
@@ -425,11 +428,20 @@ class VerificationService:
             combined_text=combined_text,
             recommended_next_step="parse_with_llm",
         )
+        parser_start = time.perf_counter()
         brief = self._parse_verification_brief(issue, comments, evidence)
+        parser_duration_ms = int((time.perf_counter() - parser_start) * 1000)
         parser_requested, parser_used, parser_fallback = self._parser_run_metadata(brief)
         plan = plan_verification(brief)
+        adapter_start = time.perf_counter()
         execution = self._execute_with_adapter(plan, brief, issue)
+        adapter_duration_ms = int((time.perf_counter() - adapter_start) * 1000)
         result = self._apply_parser_provenance(execution.result, brief, parser_fallback)
+        result = self._attach_runtime_evidence(
+            result,
+            parser_duration_ms=parser_duration_ms,
+            adapter_duration_ms=adapter_duration_ms,
+        )
         return VerifyResponse(
             run_id=run_id,
             status=RunStatus.COMPLETED,
@@ -445,6 +457,8 @@ class VerificationService:
             parser_requested=parser_requested,
             parser_used=parser_used,
             parser_fallback_triggered=parser_fallback,
+            parser_duration_ms=parser_duration_ms,
+            adapter_duration_ms=adapter_duration_ms,
         )
 
     def _ensure_full_payload(self, run: StoredRun) -> VerifyResponse:
@@ -454,9 +468,11 @@ class VerificationService:
 
         updated = False
         if payload.verification_brief is None:
+            parser_start = time.perf_counter()
             brief = self._parse_verification_brief(
                 payload.issue, payload.comments, payload.evidence_packet
             )
+            parser_duration_ms = int((time.perf_counter() - parser_start) * 1000)
             parser_requested, parser_used, parser_fallback = self._parser_run_metadata(brief)
             payload = payload.model_copy(
                 update={
@@ -464,6 +480,7 @@ class VerificationService:
                     "parser_requested": parser_requested,
                     "parser_used": parser_used,
                     "parser_fallback_triggered": parser_fallback,
+                    "parser_duration_ms": parser_duration_ms,
                 }
             )
             updated = True
@@ -478,11 +495,13 @@ class VerificationService:
             and payload.verification_plan is not None
             and payload.verification_result is None
         ):
+            adapter_start = time.perf_counter()
             execution = self._execute_with_adapter(
                 payload.verification_plan,
                 payload.verification_brief,
                 payload.issue,
             )
+            adapter_duration_ms = int((time.perf_counter() - adapter_start) * 1000)
             brief = payload.verification_brief
             parser_fallback = payload.parser_fallback_triggered
             if brief is not None:
@@ -492,6 +511,14 @@ class VerificationService:
                 result = self._apply_parser_provenance(
                     result, brief, parser_fallback
                 )
+            parser_duration_ms = payload.parser_duration_ms
+            if payload.adapter_duration_ms is not None:
+                adapter_duration_ms = payload.adapter_duration_ms
+            result = self._attach_runtime_evidence(
+                result,
+                parser_duration_ms=parser_duration_ms,
+                adapter_duration_ms=adapter_duration_ms,
+            )
             payload = payload.model_copy(
                 update={
                     "verification_result": result,
@@ -499,6 +526,8 @@ class VerificationService:
                     "primary_adapter_requested": execution.primary_adapter_requested,
                     "fallback_triggered": execution.fallback_triggered,
                     "parser_fallback_triggered": parser_fallback,
+                    "parser_duration_ms": parser_duration_ms,
+                    "adapter_duration_ms": adapter_duration_ms,
                 }
             )
             updated = True
@@ -559,6 +588,36 @@ class VerificationService:
                 "resilience_notes": resilience_notes,
             }
         )
+
+    @staticmethod
+    def _attach_runtime_evidence(
+        result: VerificationResult,
+        *,
+        parser_duration_ms: int | None,
+        adapter_duration_ms: int | None,
+    ) -> VerificationResult:
+        notes = list(result.execution_notes)
+        evidence = list(result.evidence)
+        timing_parts: list[str] = []
+        if parser_duration_ms is not None:
+            timing_parts.append(f"parser={parser_duration_ms}ms")
+        if adapter_duration_ms is not None:
+            timing_parts.append(f"adapter={adapter_duration_ms}ms")
+        if not timing_parts:
+            return result
+
+        timing_note = "Runtime timings: " + ", ".join(timing_parts)
+        if timing_note not in notes:
+            notes.append(timing_note)
+        if not any(item.label == "timings" for item in evidence):
+            evidence.append(
+                ExecutionArtifact(
+                    kind=ArtifactKind.NOTE,
+                    label="timings",
+                    content=timing_note,
+                )
+            )
+        return result.model_copy(update={"execution_notes": notes, "evidence": evidence})
 
     @staticmethod
     def _build_raw_report_text(issue: IssueSummary, comments: list[CommentSummary]) -> str:

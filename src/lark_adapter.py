@@ -11,6 +11,7 @@ import httpx
 from src.config import (
     GETLARK_API_KEY,
     GETLARK_API_URL,
+    GETLARK_ENABLE_WORKFLOW_INVOKE,
     GETLARK_TIMEOUT_SECONDS,
     effective_primary_adapter_mode,
     fault_injection_mode,
@@ -64,6 +65,19 @@ class GetLarkWorkflowListResult:
     workflow_count: int
     summary: str
     response_snippet: str
+    workflow_ids: list[str]
+
+
+@dataclass
+class GetLarkInvokeResult:
+    attempted: bool
+    endpoint: str
+    status_code: int | None
+    success: bool
+    summary: str
+    response_snippet: str
+    workflow_id: str | None = None
+    execution_id: str | None = None
 
 
 class GetLarkApiClient:
@@ -117,6 +131,7 @@ class GetLarkApiClient:
             raise LiveCheckFailedError("getlark API returned non-JSON response") from exc
 
         count, summary = _summarize_workflow_list(payload)
+        workflow_ids = _extract_workflow_ids(payload)
         snippet = json.dumps(payload, indent=2)[:1200]
         return GetLarkWorkflowListResult(
             endpoint=endpoint,
@@ -124,6 +139,78 @@ class GetLarkApiClient:
             workflow_count=count,
             summary=summary,
             response_snippet=snippet,
+            workflow_ids=workflow_ids,
+        )
+
+    def invoke_workflow_best_effort(
+        self,
+        *,
+        plan: VerificationPlan,
+        issue: IssueSummary,
+        workflow_ids: list[str],
+    ) -> GetLarkInvokeResult:
+        """
+        Thin real invoke attempt for sponsor proof.
+        Best effort only: never raises, preserves caller fallback behavior.
+        """
+        if not workflow_ids:
+            return GetLarkInvokeResult(
+                attempted=False,
+                endpoint=f"{self._api_url}/workflows/{{id}}/invoke",
+                status_code=None,
+                success=False,
+                summary="No workflow id available from /workflows response; skipped invoke attempt.",
+                response_snippet="{}",
+            )
+
+        workflow_id = workflow_ids[0]
+        # Matches @getlark/cli: POST /workflows/{workflowId}/invoke with {}
+        endpoint = f"{self._api_url}/workflows/{workflow_id}/invoke"
+        headers = {
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "X-API-Key": self._api_key,
+        }
+        try:
+            with httpx.Client(timeout=self._timeout) as client:
+                response = client.post(endpoint, headers=headers, json={})
+        except httpx.RequestError as exc:
+            return GetLarkInvokeResult(
+                attempted=True,
+                endpoint=endpoint,
+                status_code=None,
+                success=False,
+                summary=f"Invoke attempt failed with network error: {exc}",
+                response_snippet="{}",
+            )
+
+        snippet = response.text[:1200]
+        if response.status_code >= 400:
+            return GetLarkInvokeResult(
+                attempted=True,
+                endpoint=endpoint,
+                status_code=response.status_code,
+                success=False,
+                summary=(
+                    f"Invoke endpoint returned HTTP {response.status_code}; "
+                    "preserved live-check behavior without failing verify."
+                ),
+                response_snippet=snippet,
+            )
+
+        execution_id = _extract_execution_id(response)
+        return GetLarkInvokeResult(
+            attempted=True,
+            endpoint=endpoint,
+            status_code=response.status_code,
+            success=True,
+            summary=(
+                f"Lark workflow invoked successfully via POST {endpoint}"
+                + (f" (execution_id={execution_id})" if execution_id else "")
+            ),
+            response_snippet=snippet,
+            workflow_id=workflow_id,
+            execution_id=execution_id,
         )
 
 
@@ -325,6 +412,17 @@ class GetLarkLiveCheckAdapter(LarkAdapter):
         issue: IssueSummary,
     ) -> VerificationResult:
         listing = self._client.list_workflows(limit=5)
+        invoke = None
+        if (
+            GETLARK_ENABLE_WORKFLOW_INVOKE
+            and plan.mode == PlanMode.LARK_WORKFLOW_CANDIDATE
+            and listing.workflow_ids
+        ):
+            invoke = self._client.invoke_workflow_best_effort(
+                plan=plan,
+                issue=issue,
+                workflow_ids=listing.workflow_ids,
+            )
         status = resolve_execution_status(plan, brief)
         title = issue.title.strip() or f"Issue #{issue.number}"
 
@@ -351,17 +449,59 @@ class GetLarkLiveCheckAdapter(LarkAdapter):
                 kind=ArtifactKind.NOTE,
                 label="scope",
                 content=(
-                    "Live check only — listed workflows; did not create or invoke a "
-                    "getlark test run for this GitHub issue"
+                    "Live check listed workflows. Invoke is optional and controlled by "
+                    "GETLARK_ENABLE_WORKFLOW_INVOKE."
                 ),
             ),
         ]
+        extra_notes = [
+            f"Real getlark API call: GET {listing.endpoint}",
+            "This confirms API key and connectivity, not bug reproduction",
+        ]
+        if invoke is not None:
+            evidence.append(
+                ExecutionArtifact(
+                    kind=ArtifactKind.LOG,
+                    label="invoke_attempt",
+                    content=invoke.summary,
+                )
+            )
+            evidence.append(
+                ExecutionArtifact(
+                    kind=ArtifactKind.TRACE,
+                    label="invoke_response",
+                    content=invoke.response_snippet,
+                )
+            )
+            if invoke.execution_id:
+                evidence.append(
+                    ExecutionArtifact(
+                        kind=ArtifactKind.NOTE,
+                        label="execution_id",
+                        content=(
+                            f"{invoke.execution_id}"
+                            + (f" (workflow {invoke.workflow_id})" if invoke.workflow_id else "")
+                        ),
+                    )
+                )
+            if invoke.success:
+                extra_notes.append("Lark workflow invoked successfully.")
+                if invoke.execution_id:
+                    extra_notes.append(f"getlark execution_id: {invoke.execution_id}")
+            elif invoke.attempted:
+                extra_notes.append(
+                    "Lark workflow invoke attempt failed; retained non-breaking live-check flow."
+                )
 
         return VerificationResult(
             status=status,
             outcome_summary=(
                 f"{title}: getlark live check succeeded ({listing.summary}); "
-                "full workflow execution was not run."
+                + (
+                    "workflow invoke attempted."
+                    if invoke is not None and invoke.attempted
+                    else "full workflow execution was not run."
+                )
             ),
             evidence=evidence,
             execution_notes=execution_notes(
@@ -369,10 +509,7 @@ class GetLarkLiveCheckAdapter(LarkAdapter):
                 brief,
                 status,
                 adapter_label="getlark_live_check",
-                extra=[
-                    f"Real getlark API call: GET {listing.endpoint}",
-                    "This confirms API key and connectivity, not bug reproduction",
-                ],
+                extra=extra_notes,
             ),
             resilience_notes=[
                 "No resilience gateway configured yet",
@@ -747,3 +884,51 @@ def _summarize_workflow_list(payload: Any) -> tuple[int, str]:
     if names:
         return len(items), f"{len(items)} workflow(s); examples: {', '.join(names)}"
     return len(items), f"{len(items)} workflow(s) returned"
+
+
+def _extract_workflow_ids(payload: Any) -> list[str]:
+    items: list[Any]
+    if isinstance(payload, list):
+        items = payload
+    elif isinstance(payload, dict):
+        raw = payload.get("workflows") or payload.get("data") or payload.get("items")
+        items = raw if isinstance(raw, list) else []
+    else:
+        return []
+
+    ids: list[str] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        value = item.get("id") or item.get("workflow_id") or item.get("name")
+        if value:
+            ids.append(str(value))
+    return ids
+
+
+def _extract_execution_id(response: httpx.Response) -> str | None:
+    try:
+        payload: Any = response.json()
+    except ValueError:
+        return None
+    return _execution_id_from_payload(payload)
+
+
+def _execution_id_from_payload(payload: Any) -> str | None:
+    if not isinstance(payload, dict):
+        return None
+    candidates = (
+        payload.get("id"),
+        payload.get("execution_id"),
+        payload.get("run_id"),
+    )
+    for candidate in candidates:
+        if candidate:
+            return str(candidate)
+    nested = payload.get("execution") or payload.get("data")
+    if isinstance(nested, dict):
+        for key in ("id", "execution_id", "run_id"):
+            value = nested.get(key)
+            if value:
+                return str(value)
+    return None

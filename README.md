@@ -117,7 +117,7 @@ This makes the demo flow visible: **plan → execute → result**, with statuses
 | `fake` (default) | `LARK_MODE=fake` or unset | Reliable simulated execution |
 | `getlark_mcp` | `LARK_MODE=getlark_mcp` + `GETLARK_API_KEY` | Scaffold describes MCP workflow at `api.getlark.ai/mcp`; **no HTTP calls** |
 | `getlark_cli` | `LARK_MODE=getlark_cli` + `GETLARK_API_KEY` | Scaffold shows `getlark workflows create/invoke` commands; **no subprocess** |
-| `getlark_live_check` | `LARK_MODE=getlark_live_check` + `GETLARK_API_KEY` | **Real HTTP** `GET /workflows` — validates API key and connectivity only |
+| `getlark_live_check` | `LARK_MODE=getlark_live_check` + `GETLARK_API_KEY` | **Real HTTP** `GET /workflows`; optional best-effort `POST /workflows/invoke` when enabled |
 | Missing API key | mode set, no `GETLARK_API_KEY` | **Falls back to fake** with a note in `verification_result` |
 
 ### Thin real getlark mode (`getlark_live_check`)
@@ -139,9 +139,10 @@ PRIMARY_ADAPTER_MODE=getlark_live_check
 ```env
 GETLARK_STRICT_MODE=false    # true = fail verify on live API error (no fake fallback)
 GETLARK_TIMEOUT_SECONDS=15
+GETLARK_ENABLE_WORKFLOW_INVOKE=false  # true = attempt one real workflow invoke after list
 ```
 
-**What counts as a “real call”:** A successful `GET /workflows` with HTTP 2xx and JSON parsed into `verification_result.evidence` (`live_api`, `workflows`, `api_response` artifacts). `execution_notes` state that a real API call was made; `resilience_notes` include `No fallback path executed in this run`.
+**What counts as a “real call”:** A successful `GET /workflows` with HTTP 2xx and JSON parsed into `verification_result.evidence` (`live_api`, `workflows`, `api_response` artifacts). If `GETLARK_ENABLE_WORKFLOW_INVOKE=true`, LarkGuard also attempts a lightweight `POST /workflows/invoke` and stores invoke evidence (`invoke_attempt`, `invoke_response`, optional run id).
 
 **On live failure** (`GETLARK_STRICT_MODE=false`, default): verify still completes via **fake adapter**; `fallback_triggered=true`, `adapter_used=fake`, and notes explain the API error. With `GETLARK_STRICT_MODE=true`, verify returns HTTP 502 with `getlark_live_check_failed`.
 
@@ -170,7 +171,7 @@ Get your API key: [getlark.ai](https://getlark.ai) → Settings → API Keys. Do
 
 **Why fallback is intentional:** Demos should not fail without credentials. `execution_notes` always shows which adapter ran.
 
-**Current limitation:** MCP/CLI scaffolds do not call the API; use `getlark_live_check` for a real HTTP touchpoint. Full workflow invoke is the next step.
+**Current limitation:** MCP/CLI scaffolds do not call the API. `getlark_live_check` is the thin real path; invoke is best-effort and does not yet execute full end-to-end bug reproduction.
 
 ## GitHub comments & fault injection (Step 5)
 
@@ -272,6 +273,7 @@ ls .larkguard_runs/
 python -m src.cli demo-issue-text --type structured
 python -m src.cli verify --issue-number 123 --owner org --repo repo --local
 python -m src.cli replay --run-id <run_id> --local
+python -m src.cli demo-summary --run-id <run_id> --local
 python -m src.cli runs --local
 ```
 

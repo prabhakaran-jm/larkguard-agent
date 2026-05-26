@@ -100,6 +100,14 @@ def main() -> None:
     runs_parser.add_argument("--api-base", type=str, default=DEFAULT_API_BASE)
     runs_parser.add_argument("--limit", type=int, default=20)
 
+    summary_parser = subparsers.add_parser(
+        "demo-summary",
+        help="Print judge-friendly summary for a run",
+    )
+    summary_parser.add_argument("--run-id", type=str, required=True)
+    summary_parser.add_argument("--local", action="store_true")
+    summary_parser.add_argument("--api-base", type=str, default=DEFAULT_API_BASE)
+
     demo_parser = subparsers.add_parser(
         "demo-issue-text",
         help="Print ready-to-paste GitHub issue title/body for demos",
@@ -119,6 +127,8 @@ def main() -> None:
             _run_replay(args)
         elif args.command == "runs":
             _run_list_runs(args)
+        elif args.command == "demo-summary":
+            _run_demo_summary(args)
         elif args.command == "demo-issue-text":
             _run_demo_issue_text(args)
     except ServiceError as exc:
@@ -255,6 +265,54 @@ def _run_list_runs(args: argparse.Namespace) -> None:
             run["stage"],
         )
     console.print(table)
+
+
+def _run_demo_summary(args: argparse.Namespace) -> None:
+    if args.local:
+        result = asyncio.run(VerificationService().replay(args.run_id))
+    else:
+        response = httpx.post(
+            f"{args.api_base.rstrip('/')}/replay",
+            json=ReplayRequest(run_id=args.run_id).model_dump(),
+            timeout=60.0,
+        )
+        _raise_for_api_error(response)
+        result = VerifyResponse.model_validate(response.json())
+
+    console.print(_render_demo_summary(result))
+
+
+def _render_demo_summary(result: VerifyResponse) -> str:
+    status = result.verification_result.status.value if result.verification_result else result.status.value
+    workflow = result.verification_plan.workflow_name if result.verification_plan else "unknown"
+    adapter = result.adapter_used or "unknown"
+    parser = result.parser_used or "deterministic"
+    fallback = "yes" if result.fallback_triggered else "no"
+    parser_fallback = "yes" if result.parser_fallback_triggered else "no"
+    timing = []
+    if result.parser_duration_ms is not None:
+        timing.append(f"parser={result.parser_duration_ms}ms")
+    if result.adapter_duration_ms is not None:
+        timing.append(f"adapter={result.adapter_duration_ms}ms")
+    timing_text = ", ".join(timing) if timing else "n/a"
+
+    lines = [
+        f"# LarkGuard Demo Summary ({result.run_id})",
+        "",
+        f"- Status: **{status}**",
+        f"- Workflow: `{workflow}`",
+        f"- Adapter: `{adapter}` (fallback: {fallback})",
+        f"- Parser: `{parser}` (fallback: {parser_fallback})",
+        f"- Timings: {timing_text}",
+    ]
+    if result.github_comment_url:
+        lines.append(f"- Managed comment: {result.github_comment_url}")
+    if result.verification_result and result.verification_result.evidence:
+        lines.extend(["", "## Evidence Highlights"])
+        for artifact in result.verification_result.evidence[:5]:
+            snippet = artifact.content if len(artifact.content) <= 140 else artifact.content[:137] + "..."
+            lines.append(f"- `{artifact.label}`: {snippet}")
+    return "\n".join(lines)
 
 
 def _raise_for_api_error(response: httpx.Response) -> None:

@@ -189,6 +189,8 @@ class VerifyResponse(BaseModel):
     parser_requested: str | None = None
     parser_used: str | None = None
     parser_fallback_triggered: bool = False
+    parser_duration_ms: int | None = None
+    adapter_duration_ms: int | None = None
 
 
 class RunInputParams(BaseModel):
