@@ -1,13 +1,24 @@
 from __future__ import annotations
 
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Literal
 
 import httpx
 
 from src.config import COMMENT_ONLY_ON_COMPLETED, ENABLE_GITHUB_COMMENTS, fault_injection_mode
 from src.models import CommentSummary, ResultStatus, RunStatus, VerifyResponse
 
+LARKGUARD_MANAGED_MARKER = "<!-- larkguard:managed -->"
 LARKGUARD_RUN_MARKER = "<!-- larkguard-run:"
+
+CommentAction = Literal["created", "updated", "skipped"]
+
+
+@dataclass
+class CommentPostResult:
+    url: str | None
+    comment_id: int | None
+    action: CommentAction
 
 
 class GitHubCommentPosterError(Exception):
@@ -24,8 +35,8 @@ class GitHubCommentPosterError(Exception):
 
 
 def is_larkguard_comment(body: str) -> bool:
-    """Detect comments posted by LarkGuard so they are not parsed as issue evidence."""
-    return LARKGUARD_RUN_MARKER in body
+    """Detect LarkGuard-managed comments so they are not parsed as issue evidence."""
+    return LARKGUARD_MANAGED_MARKER in body or LARKGUARD_RUN_MARKER in body
 
 
 def filter_larkguard_comments(comments: list[CommentSummary]) -> list[CommentSummary]:
@@ -41,16 +52,23 @@ def should_post_github_comment(response: VerifyResponse) -> bool:
 
 
 def render_verification_comment(response: VerifyResponse) -> str:
-    """Build a concise markdown comment for a completed verification run."""
+    """Build a compact markdown comment for a completed verification run."""
     result = response.verification_result
     plan = response.verification_plan
     brief = response.verification_brief
     if result is None:
-        return f"<!-- larkguard-run:{response.run_id} -->\n\n## LarkGuard Verification Result\n\nRun incomplete."
+        return (
+            f"{LARKGUARD_MANAGED_MARKER}\n"
+            f"<!-- larkguard-run:{response.run_id} -->\n\n"
+            "## LarkGuard Verification Result\n\nRun incomplete."
+        )
 
     status_label = _status_label(result.status)
     workflow = plan.workflow_name if plan else "unknown"
+    adapter = response.adapter_used or "unknown"
+
     lines: list[str] = [
+        LARKGUARD_MANAGED_MARKER,
         f"<!-- larkguard-run:{response.run_id} -->",
         "",
         "## LarkGuard Verification Result",
@@ -63,53 +81,51 @@ def render_verification_comment(response: VerifyResponse) -> str:
 
     lines.extend(
         [
-            f"**Status:** {status_label}",
-            f"**Workflow:** `{workflow}`",
-            f"**Run ID:** `{response.run_id}`",
+            f"- **Status:** {status_label}",
+            f"- **Workflow:** `{workflow}`",
+            f"- **Adapter:** `{adapter}`",
+            f"- **Run ID:** `{response.run_id}`",
         ]
     )
-    if response.primary_adapter_requested:
-        lines.append(f"**Primary adapter requested:** `{response.primary_adapter_requested}`")
-    if response.adapter_used:
-        lines.append(f"**Adapter used:** `{response.adapter_used}`")
     if response.fallback_triggered:
-        lines.append("**Fallback triggered:** yes")
+        lines.append(
+            f"- **Fallback:** yes (`{response.primary_adapter_requested}` → `{adapter}`)"
+        )
 
-    lines.extend(["", "### Summary", "", result.outcome_summary, "", "### Evidence", ""])
+    lines.extend(["", result.outcome_summary, "", "**Evidence**"])
     if result.evidence:
-        for artifact in result.evidence[:8]:
-            lines.append(f"- **{artifact.label}** ({artifact.kind.value}): {artifact.content}")
+        for artifact in result.evidence[:4]:
+            text = artifact.content if len(artifact.content) <= 120 else artifact.content[:117] + "..."
+            lines.append(f"- `{artifact.label}`: {text}")
     else:
         lines.append("- _(none)_")
 
     if brief and brief.missing_information:
-        lines.extend(["", "### Missing Information", ""])
-        lines.extend(f"- {item}" for item in brief.missing_information)
+        lines.extend(["", "**Missing information**"])
+        for item in brief.missing_information[:4]:
+            lines.append(f"- {item}")
 
-    lines.extend(["", "### Execution Notes", ""])
-    for note in result.execution_notes[:10]:
+    lines.extend(["", "**Resilience**"])
+    for note in result.resilience_notes[:4]:
         lines.append(f"- {note}")
 
-    lines.extend(["", "### Resilience", ""])
-    for note in result.resilience_notes[:10]:
-        lines.append(f"- {note}")
-
-    lines.extend(["", "### Next Action", "", _next_action(result.status), ""])
-    lines.append("_Posted by LarkGuard — evidence-first bug verification._")
+    lines.extend(["", f"**Next:** {_next_action(result.status)}", ""])
+    lines.append(
+        "_Managed by LarkGuard. Re-run verification to update this comment._"
+    )
     return "\n".join(lines)
 
 
 def _demo_banner(response: VerifyResponse) -> str:
-    fault = fault_injection_mode()
-    if response.fallback_triggered and fault == "force_adapter_failure":
+    if response.fallback_triggered and fault_injection_mode() == "force_adapter_failure":
         return (
-            "> **Degraded run:** Primary adapter failure was simulated; "
-            "verification completed via **fake** fallback."
+            "> **Degraded run** — primary adapter failure was simulated; "
+            "completed via **fake** fallback."
         )
-    if fault == "force_fallback_note":
-        return "> **Demo note:** Resilience degradation was simulated for demonstration purposes."
+    if fault_injection_mode() == "force_fallback_note":
+        return "> **Demo note** — resilience degradation simulated for demonstration."
     if response.fallback_triggered:
-        return "> **Degraded run:** Fell back to the fake adapter to complete verification safely."
+        return "> **Degraded run** — fell back to fake adapter to complete verification."
     return ""
 
 
@@ -125,15 +141,19 @@ def _status_label(status: ResultStatus) -> str:
 
 def _next_action(status: ResultStatus) -> str:
     if status == ResultStatus.BLOCKED:
-        return (
-            "Ask the reporter for clearer reproduction steps, expected vs actual behavior, "
-            "and environment details before retrying automated verification."
-        )
+        return "Ask reporter for repro steps, expected/actual behavior, and environment details."
     if status in (ResultStatus.SIMULATED, ResultStatus.REPRODUCED):
-        return "Route to engineering for confirmation; connect live getlark workflow execution when ready."
+        return "Route to engineering; connect live getlark execution when ready."
     if status == ResultStatus.NOT_REPRODUCED:
-        return "Request clarification from the reporter or retry verification manually."
-    return "Review the run artifacts and decide next steps."
+        return "Request clarification or retry verification manually."
+    return "Review artifacts and decide next steps."
+
+
+@dataclass
+class _IssueCommentRecord:
+    comment_id: int
+    body: str
+    html_url: str
 
 
 class GitHubCommentPoster:
@@ -151,65 +171,143 @@ class GitHubCommentPoster:
             "X-GitHub-Api-Version": "2022-11-28",
         }
 
-    async def post_issue_comment(
+    async def upsert_managed_comment(
         self,
         owner: str,
         repo: str,
         issue_number: int,
         body: str,
-    ) -> str:
+    ) -> CommentPostResult:
+        existing = await self._find_managed_comment(owner, repo, issue_number)
+        if existing is not None:
+            url = await self._update_issue_comment(owner, repo, existing.comment_id, body)
+            return CommentPostResult(
+                url=url,
+                comment_id=existing.comment_id,
+                action="updated",
+            )
+
+        url, comment_id = await self._create_issue_comment(owner, repo, issue_number, body)
+        return CommentPostResult(url=url, comment_id=comment_id, action="created")
+
+    async def _find_managed_comment(
+        self, owner: str, repo: str, issue_number: int
+    ) -> _IssueCommentRecord | None:
+        comments = await self._list_issue_comments(owner, repo, issue_number)
+        legacy: _IssueCommentRecord | None = None
+        for comment in comments:
+            if LARKGUARD_MANAGED_MARKER in comment.body:
+                return comment
+            if LARKGUARD_RUN_MARKER in comment.body and legacy is None:
+                legacy = comment
+        return legacy
+
+    async def _list_issue_comments(
+        self, owner: str, repo: str, issue_number: int
+    ) -> list[_IssueCommentRecord]:
         url = f"{self.BASE_URL}/repos/{owner}/{repo}/issues/{issue_number}/comments"
+        data = await self._request_json("GET", url)
+        if not isinstance(data, list):
+            raise GitHubCommentPosterError("Unexpected GitHub comments list response")
+
+        records: list[_IssueCommentRecord] = []
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+            try:
+                records.append(
+                    _IssueCommentRecord(
+                        comment_id=int(item["id"]),
+                        body=str(item.get("body") or ""),
+                        html_url=str(item.get("html_url") or ""),
+                    )
+                )
+            except (KeyError, TypeError, ValueError):
+                continue
+        return records
+
+    async def _create_issue_comment(
+        self, owner: str, repo: str, issue_number: int, body: str
+    ) -> tuple[str, int]:
+        url = f"{self.BASE_URL}/repos/{owner}/{repo}/issues/{issue_number}/comments"
+        data = await self._request_json("POST", url, json_body={"body": body})
+        return self._parse_comment_response(data, url)
+
+    async def _update_issue_comment(
+        self, owner: str, repo: str, comment_id: int, body: str
+    ) -> str:
+        url = f"{self.BASE_URL}/repos/{owner}/{repo}/issues/comments/{comment_id}"
+        data = await self._request_json("PATCH", url, json_body={"body": body})
+        html_url, _ = self._parse_comment_response(data, url)
+        return html_url
+
+    async def _request_json(
+        self,
+        method: str,
+        url: str,
+        *,
+        json_body: dict[str, Any] | None = None,
+    ) -> Any:
         async with httpx.AsyncClient(timeout=self._timeout) as client:
             try:
-                response = await client.post(
+                response = await client.request(
+                    method,
                     url,
                     headers=self._headers,
-                    json={"body": body},
+                    json=json_body,
                 )
             except httpx.RequestError as exc:
                 raise GitHubCommentPosterError(
-                    f"Failed to post GitHub comment: {exc}",
-                    context={"url": url},
+                    f"GitHub comment API request failed: {exc}",
+                    context={"url": url, "method": method},
                 ) from exc
 
         if response.status_code == 401:
             raise GitHubCommentPosterError(
-                "GitHub rejected comment post (authentication failed)",
+                "GitHub rejected comment request (authentication failed)",
                 status_code=401,
                 context={"url": url},
             )
         if response.status_code == 403:
             raise GitHubCommentPosterError(
-                "GitHub rejected comment post (insufficient permissions or rate limit)",
+                "GitHub rejected comment request (insufficient permissions or rate limit)",
                 status_code=403,
                 context={"url": url, "body": response.text[:300]},
             )
         if response.status_code == 404:
             raise GitHubCommentPosterError(
-                "GitHub issue not found for comment post",
+                "GitHub resource not found for comment request",
                 status_code=404,
                 context={"url": url},
             )
         if response.status_code >= 400:
             raise GitHubCommentPosterError(
-                f"GitHub comment post failed ({response.status_code})",
+                f"GitHub comment API error ({response.status_code})",
                 status_code=response.status_code,
                 context={"url": url, "body": response.text[:300]},
             )
 
         try:
-            data = response.json()
+            return response.json()
         except ValueError as exc:
             raise GitHubCommentPosterError(
-                "GitHub returned malformed JSON for comment post",
+                "GitHub returned malformed JSON for comment request",
                 status_code=response.status_code,
             ) from exc
 
-        html_url = data.get("html_url") if isinstance(data, dict) else None
-        if not html_url:
+    @staticmethod
+    def _parse_comment_response(data: Any, url: str) -> tuple[str, int]:
+        if not isinstance(data, dict):
             raise GitHubCommentPosterError(
-                "GitHub comment post succeeded but response had no html_url",
-                status_code=response.status_code,
+                "Unexpected GitHub comment response shape",
                 context={"url": url},
             )
-        return str(html_url)
+        try:
+            html_url = str(data["html_url"])
+            comment_id = int(data["id"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise GitHubCommentPosterError(
+                "GitHub comment response missing id or html_url",
+                context={"url": url},
+            ) from exc
+        return html_url, comment_id

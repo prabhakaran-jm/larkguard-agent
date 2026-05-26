@@ -2,7 +2,7 @@
 
 Turn messy GitHub bug reports into proof — reproduced, not reproduced, or blocked — with evidence and graceful fallback when agent infrastructure fails.
 
-**Sponsor integration:** [getlark.ai](https://getlark.ai) (testing workflows via CLI/MCP) — not Lark Suite / `larksuite.com`.
+**Sponsor integration:** [getlark.ai](https://getlark.ai) (testing workflows via CLI/MCP)
 
 ## Why this matters
 
@@ -39,6 +39,11 @@ Bug reports are noisy. Maintainers waste time guessing whether an issue is actio
 - GitHub issue comment posting with markdown summary (`ENABLE_GITHUB_COMMENTS`)
 - Env-driven fault injection (`FAULT_INJECTION_MODE`, `PRIMARY_ADAPTER_MODE`)
 - Visible degraded vs healthy runs in comments and resilience notes
+
+**Step 6**
+- Idempotent managed GitHub comment (create vs update)
+- `demo-issue-text` CLI helper for seed issues
+- Compact comment layout + richer verify CLI summary
 
 **Not yet:** Live getlark MCP/CLI calls, LLM parsing, TrueFoundry gateway, auth, database, or webhooks.
 
@@ -108,7 +113,49 @@ FAULT_INJECTION_MODE=none          # none | force_adapter_failure | force_fallba
 
 `LARK_MODE` still works if `PRIMARY_ADAPTER_MODE` is unset. **Fake remains the reliable fallback** — runs always complete unless GitHub fetch fails.
 
-LarkGuard skips its own posted comments (marker `<!-- larkguard-run:... -->`) when building evidence, so re-verifying an issue does not treat prior verification comments as reproduction steps.
+LarkGuard skips its own posted comments when building evidence, so re-verifying an issue does not treat prior bot posts as reproduction steps.
+
+## Demo setup (Step 6)
+
+**One managed comment per issue** — marker `<!-- larkguard:managed -->`. Re-runs **update** the same GitHub comment (`comment_action: updated`) instead of spamming new ones.
+
+### Seed issue examples
+
+```bash
+python -m src.cli demo-issue-text --type vague
+python -m src.cli demo-issue-text --type structured
+python -m src.cli demo-issue-text --type degraded
+```
+
+Copy title/body into a new GitHub issue (or edit an existing test issue).
+
+### Healthy run (with comments)
+
+```bash
+ENABLE_GITHUB_COMMENTS=true \
+PRIMARY_ADAPTER_MODE=fake \
+FAULT_INJECTION_MODE=none \
+python -m src.cli verify --issue-number <N> --local
+```
+
+### Degraded run (with comments)
+
+```bash
+ENABLE_GITHUB_COMMENTS=true \
+PRIMARY_ADAPTER_MODE=getlark_mcp \
+FAULT_INJECTION_MODE=force_adapter_failure \
+python -m src.cli verify --issue-number <N> --local
+```
+
+Re-run the same issue to see `GitHub comment: updated` in the CLI.
+
+### What judges should notice
+
+1. **Evidence-first pipeline** — issue → brief → plan → result (stored + replayable).
+2. **getlark-ready** — scaffold adapter describes MCP/CLI workflow (sponsor alignment).
+3. **Resilience** — degraded run completes via fake fallback; comment banner makes it obvious.
+4. **Idempotent feedback** — one living verification comment on the issue, updated each run.
+5. **Safe defaults** — fake adapter + optional comments; no live getlark calls required for demo.
 
 ## Quickstart
 
@@ -143,6 +190,7 @@ ls .larkguard_runs/
 ### CLI commands
 
 ```bash
+python -m src.cli demo-issue-text --type structured
 python -m src.cli verify --issue-number 123 --owner org --repo repo --local
 python -m src.cli replay --run-id <run_id> --local
 python -m src.cli runs --local

@@ -178,6 +178,8 @@ class VerifyResponse(BaseModel):
     verification_plan: VerificationPlan | None = None
     verification_result: VerificationResult | None = None
     github_comment_url: str | None = None
+    github_comment_id: int | None = None
+    comment_action: str | None = None
     adapter_used: str | None = None
     primary_adapter_requested: str | None = None
     fallback_triggered: bool = False

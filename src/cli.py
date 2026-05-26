@@ -8,14 +8,66 @@ from typing import NoReturn
 
 import httpx
 from rich.console import Console
+from rich.panel import Panel
 from rich.table import Table
 
-from src.models import ReplayRequest, VerifyRequest
+from src.models import ReplayRequest, VerifyRequest, VerifyResponse
 from src.service import ServiceError, VerificationService
 
 console = Console()
 err_console = Console(stderr=True)
 DEFAULT_API_BASE = "http://127.0.0.1:8000"
+
+DEMO_ISSUE_EXAMPLES: dict[str, dict[str, str]] = {
+    "vague": {
+        "title": "Checkout sometimes fails",
+        "body": (
+            "The checkout page feels broken after the last deploy. "
+            "Sometimes it works, sometimes it doesn't. Please fix ASAP."
+        ),
+        "note": "Expect: blocked_missing_info, manual_review, status Blocked.",
+    },
+    "structured": {
+        "title": "Save profile returns 500 on settings page",
+        "body": """## Steps to reproduce
+1. Log in as a test user
+2. Open Settings → Profile
+3. Change display name and click **Save**
+
+## Expected
+Profile saves and a success toast appears.
+
+## Actual
+HTTP 500 with response `Internal Server Error`.
+
+## Environment
+- Chrome 124 on Fedora 44
+- App version 2.3.1 (staging)
+""",
+        "note": "Expect: reproducible_candidate, lark_workflow_candidate, status Simulated (scaffold).",
+    },
+    "degraded": {
+        "title": "Login button unresponsive on mobile viewport",
+        "body": """## Steps to reproduce
+1. Open the app at 375px width (mobile)
+2. Go to `/login`
+3. Tap **Sign in**
+
+## Expected
+Login form submits and navigates to dashboard.
+
+## Actual
+Button highlight appears but nothing happens (no network request).
+
+## Environment
+- Safari iOS 17, staging build 2.3.1
+""",
+        "note": (
+            "Use with fault injection for degraded demo:\n"
+            "  PRIMARY_ADAPTER_MODE=getlark_mcp FAULT_INJECTION_MODE=force_adapter_failure"
+        ),
+    },
+}
 
 
 def main() -> None:
@@ -48,6 +100,16 @@ def main() -> None:
     runs_parser.add_argument("--api-base", type=str, default=DEFAULT_API_BASE)
     runs_parser.add_argument("--limit", type=int, default=20)
 
+    demo_parser = subparsers.add_parser(
+        "demo-issue-text",
+        help="Print ready-to-paste GitHub issue title/body for demos",
+    )
+    demo_parser.add_argument(
+        "--type",
+        choices=["vague", "structured", "degraded"],
+        required=True,
+    )
+
     args = parser.parse_args()
 
     try:
@@ -57,12 +119,27 @@ def main() -> None:
             _run_replay(args)
         elif args.command == "runs":
             _run_list_runs(args)
+        elif args.command == "demo-issue-text":
+            _run_demo_issue_text(args)
     except ServiceError as exc:
         _fail(_format_service_error(exc))
     except httpx.HTTPError as exc:
         _fail(f"API request failed: {exc}")
     except KeyboardInterrupt:
         _fail("Interrupted", code=130)
+
+
+def _run_demo_issue_text(args: argparse.Namespace) -> None:
+    example = DEMO_ISSUE_EXAMPLES[args.type]
+    console.print(
+        Panel(
+            f"[bold]Title[/bold]\n{example['title']}\n\n"
+            f"[bold]Body[/bold]\n{example['body']}\n\n"
+            f"[dim]{example['note']}[/dim]",
+            title=f"Demo issue — {args.type}",
+            border_style="cyan",
+        )
+    )
 
 
 def _run_verify(args: argparse.Namespace) -> None:
@@ -80,11 +157,9 @@ def _run_verify(args: argparse.Namespace) -> None:
             timeout=60.0,
         )
         _raise_for_api_error(response)
-        from src.models import VerifyResponse
-
         result = VerifyResponse.model_validate(response.json())
 
-    console.print(f"[green]Verification complete[/green] — run_id={result.run_id}")
+    _print_verify_summary(result)
     console.print_json(data=result.model_dump(mode="json"))
 
 
@@ -98,12 +173,41 @@ def _run_replay(args: argparse.Namespace) -> None:
             timeout=60.0,
         )
         _raise_for_api_error(response)
-        from src.models import VerifyResponse
-
         result = VerifyResponse.model_validate(response.json())
 
     console.print(f"[green]Replay complete[/green] — run_id={result.run_id}")
+    _print_verify_summary(result)
     console.print_json(data=result.model_dump(mode="json"))
+
+
+def _print_verify_summary(result: VerifyResponse) -> None:
+    console.print(f"[green]Verification complete[/green] — run_id={result.run_id}")
+    if result.verification_result:
+        status = result.verification_result.status.value
+        workflow = (
+            result.verification_plan.workflow_name
+            if result.verification_plan
+            else "unknown"
+        )
+        console.print(
+            f"[bold]Result:[/bold] {status} · workflow `{workflow}` · "
+            f"adapter `{result.adapter_used or 'unknown'}`"
+        )
+        if result.fallback_triggered:
+            console.print(
+                "[yellow]Degraded:[/yellow] fallback from "
+                f"`{result.primary_adapter_requested}` → `{result.adapter_used}`"
+            )
+    if result.comment_action:
+        label = "cyan" if result.comment_action == "updated" else "green"
+        console.print(
+            f"[{label}]GitHub comment:[/{label}] {result.comment_action}",
+            end="",
+        )
+        if result.github_comment_url:
+            console.print(f" — {result.github_comment_url}")
+        else:
+            console.print()
 
 
 def _run_list_runs(args: argparse.Namespace) -> None:

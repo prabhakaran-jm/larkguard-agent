@@ -308,13 +308,21 @@ class VerificationService:
         issue_number: int,
     ) -> VerifyResponse:
         if not should_post_github_comment(response):
-            return response
+            return response.model_copy(update={"comment_action": "skipped"})
 
         body = render_verification_comment(response)
         try:
             poster = self._resolve_comment_poster()
-            url = await poster.post_issue_comment(owner, repo, issue_number, body)
-            return response.model_copy(update={"github_comment_url": url})
+            post_result = await poster.upsert_managed_comment(
+                owner, repo, issue_number, body
+            )
+            return response.model_copy(
+                update={
+                    "github_comment_url": post_result.url,
+                    "github_comment_id": post_result.comment_id,
+                    "comment_action": post_result.action,
+                }
+            )
         except GitHubCommentPosterError as exc:
             return self._append_comment_post_failure(response, str(exc))
 
