@@ -92,7 +92,8 @@ def test_resolve_execution_status_reproducible_is_simulated_by_default() -> None
     assert status == ResultStatus.SIMULATED
 
 
-def test_live_check_marks_reproduced_when_invoke_succeeds() -> None:
+def test_live_check_marks_reproduced_when_invoke_succeeds(monkeypatch) -> None:
+    monkeypatch.setattr("src.lark_adapter.GETLARK_ENABLE_WORKFLOW_INVOKE", True)
     adapter = GetLarkLiveCheckAdapter(api_key="key", api_url="https://api.getlark.ai")
     adapter._client.list_workflows = lambda limit=5: GetLarkWorkflowListResult(  # type: ignore[method-assign]
         endpoint="https://api.getlark.ai/workflows",
@@ -167,3 +168,4 @@ def test_comment_includes_sponsor_lines_for_live_parser_and_adapter() -> None:
     comment = render_verification_comment(response)
     assert "Powered by [getlark.ai]" in comment
     assert "Powered by [TrueFoundry AI Gateway]" in comment
+    assert "live getlark workflow execution proof" in comment

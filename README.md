@@ -142,7 +142,7 @@ GETLARK_TIMEOUT_SECONDS=15
 GETLARK_ENABLE_WORKFLOW_INVOKE=false  # true = attempt one real workflow invoke after list
 ```
 
-**What counts as a “real call”:** A successful `GET /workflows` with HTTP 2xx and JSON parsed into `verification_result.evidence` (`live_api`, `workflows`, `api_response` artifacts). If `GETLARK_ENABLE_WORKFLOW_INVOKE=true`, LarkGuard also attempts a lightweight `POST /workflows/invoke` and stores invoke evidence (`invoke_attempt`, `invoke_response`, optional run id).
+**What counts as a “real call”:** A successful `GET /workflows` with HTTP 2xx and JSON parsed into `verification_result.evidence` (`live_api`, `workflows`, `api_response` artifacts). If `GETLARK_ENABLE_WORKFLOW_INVOKE=true`, LarkGuard also attempts `POST /workflows/{workflow_id}/invoke` and stores invoke evidence (`invoke_attempt`, `invoke_response`, `execution_id`).
 
 **On live failure** (`GETLARK_STRICT_MODE=false`, default): verify still completes via **fake adapter**; `fallback_triggered=true`, `adapter_used=fake`, and notes explain the API error. With `GETLARK_STRICT_MODE=true`, verify returns HTTP 502 with `getlark_live_check_failed`.
 
@@ -236,6 +236,33 @@ Re-run the same issue to see `GitHub comment: updated` in the CLI.
 3. **Resilience** — degraded run completes via fake fallback; comment banner makes it obvious.
 4. **Idempotent feedback** — one living verification comment on the issue, updated each run.
 5. **Safe defaults** — fake adapter + optional comments; no live getlark calls required for demo.
+
+## Sponsor demo (canonical)
+
+Full-stack path for judges: TrueFoundry gateway parser + live getlark list/invoke + real execution ID.
+
+**Prerequisites:** `GETLARK_API_KEY` in `.env`, a workflow on your getlark account (e.g. `larkguard-smoke`), and TrueFoundry gateway env vars if using the gateway parser.
+
+```bash
+PRIMARY_ADAPTER_MODE=getlark_live_check \
+GETLARK_ENABLE_WORKFLOW_INVOKE=true \
+PARSER_MODE=truefoundry_gateway \
+FAULT_INJECTION_MODE=none \
+python -m src.cli verify --issue-number 2 --local
+```
+
+**Expected highlights (CLI summary):**
+
+```
+Result: reproduced · workflow `github_issue_verification` · adapter `getlark_live_check`
+Status: **reproduced**
+Parser: truefoundry_gateway
+Evidence includes execution_id: wflw_exec_…
+```
+
+The managed GitHub comment shows **Status: Reproduced (live getlark workflow execution proof — not target-app reproduction)** when invoke succeeds — proof that a real getlark workflow ran, not that the issue's app bug was reproduced end-to-end.
+
+Without `GETLARK_ENABLE_WORKFLOW_INVOKE=true`, the same command completes with `status: simulated` (list-only live check).
 
 ## Quickstart
 

@@ -6,7 +6,7 @@ from typing import Any, Literal
 import httpx
 
 from src.config import COMMENT_ONLY_ON_COMPLETED, ENABLE_GITHUB_COMMENTS, fault_injection_mode
-from src.models import CommentSummary, ResultStatus, RunStatus, VerifyResponse
+from src.models import CommentSummary, ResultStatus, RunStatus, VerificationResult, VerifyResponse
 
 LARKGUARD_MANAGED_MARKER = "<!-- larkguard:managed -->"
 LARKGUARD_RUN_MARKER = "<!-- larkguard-run:"
@@ -63,7 +63,7 @@ def render_verification_comment(response: VerifyResponse) -> str:
             "## LarkGuard Verification Result\n\nRun incomplete."
         )
 
-    status_label = _status_label(result.status)
+    status_label = _render_status_label(result, response)
     workflow = plan.workflow_name if plan else "unknown"
     adapter = response.adapter_used or "unknown"
 
@@ -179,6 +179,21 @@ def _status_label(status: ResultStatus) -> str:
     return labels.get(status, status.value.replace("_", " ").title())
 
 
+def _render_status_label(result: VerificationResult, response: VerifyResponse) -> str:
+    label = _status_label(result.status)
+    if (
+        result.status == ResultStatus.REPRODUCED
+        and response.adapter_used
+        and response.adapter_used.startswith("getlark")
+        and any(artifact.label == "execution_id" for artifact in (result.evidence or []))
+    ):
+        return (
+            f"{label} "
+            "(live getlark workflow execution proof — not target-app reproduction)"
+        )
+    return label
+
+
 def _next_action(status: ResultStatus) -> str:
     if status == ResultStatus.BLOCKED:
         return "Ask reporter for repro steps, expected/actual behavior, and environment details."
@@ -245,7 +260,10 @@ class GitHubCommentPoster:
     async def _list_issue_comments(
         self, owner: str, repo: str, issue_number: int
     ) -> list[_IssueCommentRecord]:
-        url = f"{self.BASE_URL}/repos/{owner}/{repo}/issues/{issue_number}/comments"
+        url = (
+            f"{self.BASE_URL}/repos/{owner}/{repo}/issues/{issue_number}/comments"
+            "?per_page=100"
+        )
         data = await self._request_json("GET", url)
         if not isinstance(data, list):
             raise GitHubCommentPosterError("Unexpected GitHub comments list response")
