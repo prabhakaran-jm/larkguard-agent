@@ -118,6 +118,56 @@ class VerificationBrief(BaseModel):
     recommended_verification_mode: VerificationMode
 
 
+class PlanMode(str, Enum):
+    MANUAL_REVIEW = "manual_review"
+    LARK_WORKFLOW_CANDIDATE = "lark_workflow_candidate"
+
+
+class PlanTargetType(str, Enum):
+    UI_FLOW = "ui_flow"
+    UNKNOWN = "unknown"
+
+
+class VerificationPlan(BaseModel):
+    mode: PlanMode
+    target_type: PlanTargetType
+    workflow_name: str
+    goal: str
+    proposed_steps: list[str]
+    assumptions: list[str]
+    blockers: list[str]
+
+
+class ArtifactKind(str, Enum):
+    LOG = "log"
+    NOTE = "note"
+    SCREENSHOT = "screenshot"
+    TRACE = "trace"
+
+
+class ExecutionArtifact(BaseModel):
+    kind: ArtifactKind
+    label: str
+    content: str
+    path: str | None = None
+
+
+class ResultStatus(str, Enum):
+    REPRODUCED = "reproduced"
+    NOT_REPRODUCED = "not_reproduced"
+    BLOCKED = "blocked"
+    SIMULATED = "simulated"
+
+
+class VerificationResult(BaseModel):
+    status: ResultStatus
+    outcome_summary: str
+    evidence: list[ExecutionArtifact]
+    execution_notes: list[str]
+    resilience_notes: list[str]
+    confidence: BriefConfidence
+
+
 class VerifyResponse(BaseModel):
     run_id: str
     status: RunStatus
@@ -125,6 +175,8 @@ class VerifyResponse(BaseModel):
     comments: list[CommentSummary]
     evidence_packet: EvidencePacket
     verification_brief: VerificationBrief | None = None
+    verification_plan: VerificationPlan | None = None
+    verification_result: VerificationResult | None = None
 
 
 class RunInputParams(BaseModel):

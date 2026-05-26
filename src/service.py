@@ -24,10 +24,16 @@ from src.models import (
     VerifyRequest,
     VerifyResponse,
 )
+from src.lark_adapter import (
+    LarkAdapter,
+    LarkAdapterSelection,
+    annotate_result,
+    plan_verification,
+    resolve_lark_adapter,
+)
 from src.parser import Parser, default_parser
 from src.run_store import RunNotFoundError, RunStore
 
-# TODO: lark_adapter module — invoke Lark CLI/MCP for agent workflows
 # TODO: resilience_gateway module — route LLM/MCP calls with graceful fallback
 # TODO: fault_injection module — simulate MCP/LLM outages for demo/resilience testing
 # TODO: github_comment_poster module — post verification evidence back to the issue
@@ -59,10 +65,12 @@ class VerificationService:
         run_store: RunStore | None = None,
         github_client: GitHubClient | None = None,
         parser: Parser | None = None,
+        lark_adapter: LarkAdapter | None = None,
     ) -> None:
         self.run_store = run_store or RunStore()
         self._github_client = github_client
         self._parser = parser or default_parser()
+        self._lark_adapter_override = lark_adapter
 
     def _resolve_github_client(self) -> GitHubClient:
         if self._github_client is not None:
@@ -152,7 +160,7 @@ class VerificationService:
             raise ServiceError(str(exc), error_type="run_not_found", status_code=404) from exc
 
         if run.normalized_payload is not None:
-            return self._ensure_verification_brief(run)
+            return self._ensure_full_payload(run)
 
         if run.status == RunStatus.FAILED and run.error:
             raise ServiceError(
@@ -171,6 +179,27 @@ class VerificationService:
 
     def list_runs(self, limit: int = 20) -> list[RunSummary]:
         return self.run_store.list_recent(limit=limit)
+
+    def _adapter_selection(self) -> LarkAdapterSelection:
+        if self._lark_adapter_override is not None:
+            adapter = self._lark_adapter_override
+            adapter_id = getattr(adapter, "adapter_id", "custom")
+            return LarkAdapterSelection(
+                adapter=adapter,
+                adapter_id=adapter_id,
+                preamble_notes=[f"Adapter selected: {adapter_id}"],
+            )
+        return resolve_lark_adapter()
+
+    def _execute_with_adapter(
+        self,
+        plan,
+        brief,
+        issue: IssueSummary,
+    ):
+        selection = self._adapter_selection()
+        result = selection.adapter.execute(plan, brief, issue)
+        return annotate_result(result, selection)
 
     def _mark_failed(self, run: StoredRun, error: str) -> None:
         run.stage = RunStage.FAILED
@@ -200,6 +229,8 @@ class VerificationService:
             recommended_next_step="parse_with_llm",
         )
         brief = self._parser.parse(issue, comments, evidence)
+        plan = plan_verification(brief)
+        result = self._execute_with_adapter(plan, brief, issue)
         return VerifyResponse(
             run_id=run_id,
             status=RunStatus.COMPLETED,
@@ -207,18 +238,44 @@ class VerificationService:
             comments=comments,
             evidence_packet=evidence,
             verification_brief=brief,
+            verification_plan=plan,
+            verification_result=result,
         )
 
-    def _ensure_verification_brief(self, run: StoredRun) -> VerifyResponse:
+    def _ensure_full_payload(self, run: StoredRun) -> VerifyResponse:
         payload = run.normalized_payload
         if payload is None:
             raise ServiceError("Run has no stored payload", error_type="run_empty", status_code=409)
-        if payload.verification_brief is not None:
-            return payload
-        brief = self._parser.parse(payload.issue, payload.comments, payload.evidence_packet)
-        payload = payload.model_copy(update={"verification_brief": brief})
-        run.normalized_payload = payload
-        self.run_store.save(run)
+
+        updated = False
+        if payload.verification_brief is None:
+            brief = self._parser.parse(
+                payload.issue, payload.comments, payload.evidence_packet
+            )
+            payload = payload.model_copy(update={"verification_brief": brief})
+            updated = True
+
+        if payload.verification_brief is not None and payload.verification_plan is None:
+            plan = plan_verification(payload.verification_brief)
+            payload = payload.model_copy(update={"verification_plan": plan})
+            updated = True
+
+        if (
+            payload.verification_brief is not None
+            and payload.verification_plan is not None
+            and payload.verification_result is None
+        ):
+            result = self._execute_with_adapter(
+                payload.verification_plan,
+                payload.verification_brief,
+                payload.issue,
+            )
+            payload = payload.model_copy(update={"verification_result": result})
+            updated = True
+
+        if updated:
+            run.normalized_payload = payload
+            self.run_store.save(run)
         return payload
 
     @staticmethod
