@@ -177,6 +177,10 @@ class VerifyResponse(BaseModel):
     verification_brief: VerificationBrief | None = None
     verification_plan: VerificationPlan | None = None
     verification_result: VerificationResult | None = None
+    github_comment_url: str | None = None
+    adapter_used: str | None = None
+    primary_adapter_requested: str | None = None
+    fallback_triggered: bool = False
 
 
 class RunInputParams(BaseModel):

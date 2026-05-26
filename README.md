@@ -35,7 +35,12 @@ Bug reports are noisy. Maintainers waste time guessing whether an issue is actio
 - Workflow descriptions built from GitHub issue + verification plan
 - Points at `api.getlark.ai` (sponsor), not Feishu Open Platform
 
-**Not yet:** Live getlark MCP/CLI calls, LLM parsing, resilience/fault injection, GitHub comment posting, auth, database, or webhooks.
+**Step 5**
+- GitHub issue comment posting with markdown summary (`ENABLE_GITHUB_COMMENTS`)
+- Env-driven fault injection (`FAULT_INJECTION_MODE`, `PRIMARY_ADAPTER_MODE`)
+- Visible degraded vs healthy runs in comments and resilience notes
+
+**Not yet:** Live getlark MCP/CLI calls, LLM parsing, TrueFoundry gateway, auth, database, or webhooks.
 
 ## Parser (Step 2)
 
@@ -82,6 +87,28 @@ Get your API key: [getlark.ai](https://getlark.ai) → Settings → API Keys. Do
 **Why fallback is intentional:** Demos should not fail without credentials. `execution_notes` always shows which adapter ran.
 
 **Current limitation:** Scaffolds only — real `api.getlark.ai` MCP/CLI wiring is the next step.
+
+## GitHub comments & fault injection (Step 5)
+
+Post a markdown verification summary back to the GitHub issue (requires token scope **`issues: write`** or repo write access).
+
+```env
+ENABLE_GITHUB_COMMENTS=true
+COMMENT_ONLY_ON_COMPLETED=true
+
+PRIMARY_ADAPTER_MODE=fake          # or getlark_mcp / getlark_cli
+FAULT_INJECTION_MODE=none          # none | force_adapter_failure | force_fallback_note
+```
+
+| Demo | `PRIMARY_ADAPTER_MODE` | `FAULT_INJECTION_MODE` | What you see |
+|------|------------------------|------------------------|--------------|
+| **Healthy** | `fake` or `getlark_mcp` | `none` | Normal summary; fake or scaffold adapter |
+| **Degraded** | `getlark_mcp` | `force_adapter_failure` | Comment banner: primary failed → fake fallback |
+| **Resilience note** | any | `force_fallback_note` | Extra resilience bullet; normal execution |
+
+`LARK_MODE` still works if `PRIMARY_ADAPTER_MODE` is unset. **Fake remains the reliable fallback** — runs always complete unless GitHub fetch fails.
+
+LarkGuard skips its own posted comments (marker `<!-- larkguard-run:... -->`) when building evidence, so re-verifying an issue does not treat prior verification comments as reproduction steps.
 
 ## Quickstart
 
@@ -137,7 +164,7 @@ Omit `--local` to call the running API instead (default `http://127.0.0.1:8000`)
 - **Live getlark MCP/CLI** — HTTP to `api.getlark.ai/mcp` or `@getlark/cli workflows invoke --wait`
 - **LLM parser** — swap in behind the same `Parser` interface for ambiguous reports
 - **Resilience/fallback layer** — wrap adapter execution with graceful degradation
-- **GitHub comment posting** — publish verification evidence back to the issue
+- **Live getlark execution** — replace scaffolds with real MCP/CLI invokes
 
 ## Project layout
 
@@ -146,7 +173,8 @@ src/
   main.py           # FastAPI routes
   service.py        # Orchestration
   parser.py         # Deterministic verification brief parser
-  lark_adapter.py   # Plan + fake Lark execution adapter
+  lark_adapter.py   # Plan + fake/getlark execution adapters
+  github_comment_poster.py  # Markdown comment render + post
   github_client.py  # GitHub REST client
   run_store.py      # Local JSON persistence
   models.py         # Pydantic schemas

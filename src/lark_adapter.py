@@ -8,8 +8,9 @@ from typing import Literal
 from src.config import (
     GETLARK_API_KEY,
     GETLARK_API_URL,
+    effective_primary_adapter_mode,
+    fault_injection_mode,
     getlark_credentials_complete,
-    requested_lark_mode,
 )
 from src.models import (
     ArtifactKind,
@@ -61,9 +62,12 @@ class LarkAdapter(ABC):
 
 
 def resolve_lark_adapter() -> LarkAdapterSelection:
-    """Select getlark.ai adapter from config; fall back to fake when credentials are missing."""
-    mode = requested_lark_mode()
+    """Select adapter using PRIMARY_ADAPTER_MODE (or LARK_MODE)."""
+    return resolve_lark_adapter_for_mode(effective_primary_adapter_mode())
 
+
+def resolve_lark_adapter_for_mode(mode: str) -> LarkAdapterSelection:
+    """Select getlark.ai adapter for a mode; fall back to fake when credentials are missing."""
     if mode == "getlark_mcp" and getlark_credentials_complete():
         return LarkAdapterSelection(
             adapter=GetLarkScaffoldAdapter(
@@ -127,6 +131,56 @@ def annotate_result(
         resilience_notes.append(
             "Fallback path executed: getlark mode requested but GETLARK_API_KEY was missing"
         )
+
+    return result.model_copy(
+        update={
+            "execution_notes": execution_notes,
+            "resilience_notes": resilience_notes,
+        }
+    )
+
+
+def apply_adapter_run_metadata(
+    result: VerificationResult,
+    *,
+    primary_adapter_requested: str,
+    adapter_used: str,
+    fallback_triggered: bool,
+    fault_mode: str,
+) -> VerificationResult:
+    """Add explicit adapter / fault-injection notes to a verification result."""
+    execution_notes = list(result.execution_notes)
+    resilience_notes = list(result.resilience_notes)
+
+    metadata_notes = [
+        f"Primary adapter requested: {primary_adapter_requested}",
+        f"Adapter used: {adapter_used}",
+    ]
+    if fallback_triggered:
+        metadata_notes.append("Fell back to fake adapter for demo-safe completion")
+
+    for note in metadata_notes:
+        if note not in execution_notes:
+            execution_notes.append(note)
+
+    if fallback_triggered:
+        resilience_notes = [
+            note
+            for note in resilience_notes
+            if note != "No fallback path executed in this run"
+        ]
+        if fault_mode == "force_adapter_failure":
+            if "Fault injection forced primary adapter failure" not in resilience_notes:
+                resilience_notes.append("Fault injection forced primary adapter failure")
+            if "Fell back to fake adapter for demo-safe completion" not in resilience_notes:
+                resilience_notes.append("Fell back to fake adapter for demo-safe completion")
+        elif not any("Fallback path" in n for n in resilience_notes):
+            resilience_notes.append("Fallback path executed to complete verification")
+
+    if fault_mode == "force_fallback_note":
+        demo_note = "Degraded mode simulated for demo purposes (force_fallback_note)"
+        if demo_note not in resilience_notes:
+            resilience_notes.append(demo_note)
 
     return result.model_copy(
         update={
