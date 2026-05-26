@@ -12,10 +12,12 @@ from src.lark_adapter import (
     GetLarkWorkflowListResult,
     GetLarkWorkflowRef,
     pick_workflow_id,
+    pick_workflow_with_source,
     resolve_execution_status,
 )
 from src.run_health import compute_run_health, format_health_summary_line, run_comment_headline
 from src.service import VerificationService
+from src.evidence_utils import evidence_content
 from src.models import (
     ArtifactKind,
     BriefClassification,
@@ -128,8 +130,49 @@ def test_live_check_marks_reproduced_when_invoke_succeeds(monkeypatch) -> None:
     result = adapter.execute(_plan(), _brief(), _issue())
 
     assert result.status == ResultStatus.REPRODUCED
-    assert any(item.label == "execution_id" for item in result.evidence)
+    labels = {item.label for item in result.evidence}
+    assert "execution_id" in labels
+    assert "workflow_selected" in labels
+    assert "workflow_selection_source" in labels
+    assert "invoke_status" in labels
+    assert evidence_content(result, "invoke_status") == "success"
     assert any("Lark workflow invoked successfully." in note for note in result.execution_notes)
+
+
+def test_canonical_sponsor_demo_evidence_shape(monkeypatch) -> None:
+    monkeypatch.setattr("src.lark_adapter.GETLARK_ENABLE_WORKFLOW_INVOKE", True)
+    monkeypatch.setattr("src.lark_adapter.GETLARK_WORKFLOW_ID", "wflw_demo")
+    monkeypatch.setattr("src.lark_adapter.GETLARK_WORKFLOW_NAME", None)
+    adapter = GetLarkLiveCheckAdapter(api_key="key", api_url="https://api.getlark.ai")
+    adapter._client.list_workflows = lambda limit=5: GetLarkWorkflowListResult(  # type: ignore[method-assign]
+        endpoint="https://api.getlark.ai/workflows",
+        status_code=200,
+        workflow_count=1,
+        summary="1 workflow(s)",
+        response_snippet='{"workflows":[{"id":"wflw_demo","name":"larkguard-smoke"}]}',
+        workflow_ids=["wflw_demo"],
+        workflow_refs=[GetLarkWorkflowRef(workflow_id="wflw_demo", name="larkguard-smoke")],
+    )
+    adapter._client.invoke_workflow_best_effort = (  # type: ignore[method-assign]
+        lambda **kwargs: GetLarkInvokeResult(
+            attempted=True,
+            endpoint="https://api.getlark.ai/workflows/wflw_demo/invoke",
+            status_code=200,
+            success=True,
+            summary="invoke ok",
+            response_snippet='{"id":"wflw_exec_demo"}',
+            workflow_id="wflw_demo",
+            execution_id="wflw_exec_demo",
+            workflow_selection_source="env_id",
+        )
+    )
+
+    result = adapter.execute(_plan(), _brief(), _issue())
+
+    assert evidence_content(result, "workflow_selected") == "wflw_demo"
+    assert evidence_content(result, "workflow_selection_source") == "env_id"
+    assert evidence_content(result, "invoke_status") == "success"
+    assert evidence_content(result, "execution_id") == "wflw_exec_demo (workflow wflw_demo)"
 
 
 def test_comment_includes_sponsor_lines_for_live_parser_and_adapter() -> None:
@@ -141,7 +184,22 @@ def test_comment_includes_sponsor_lines_for_live_parser_and_adapter() -> None:
                 kind=ArtifactKind.NOTE,
                 label="execution_id",
                 content="wflw_exec_123 (workflow wflw_123)",
-            )
+            ),
+            ExecutionArtifact(
+                kind=ArtifactKind.NOTE,
+                label="workflow_selected",
+                content="wflw_123",
+            ),
+            ExecutionArtifact(
+                kind=ArtifactKind.NOTE,
+                label="workflow_selection_source",
+                content="env_id",
+            ),
+            ExecutionArtifact(
+                kind=ArtifactKind.NOTE,
+                label="invoke_status",
+                content="success",
+            ),
         ],
         execution_notes=["Lark workflow invoked successfully."],
         resilience_notes=["No fallback path executed in this run"],
@@ -177,6 +235,63 @@ def test_comment_includes_sponsor_lines_for_live_parser_and_adapter() -> None:
     assert "live getlark workflow execution proof" in comment
     assert "**Primary requested:** `getlark_live_check`" in comment
     assert "**Live sponsor run**" in comment
+    assert "**Workflow selected:** `wflw_123`" in comment
+    assert "**Selection source:** `env_id`" in comment
+    assert "**Invoke status:** `success`" in comment
+
+
+def test_degraded_both_health_and_comment_headline() -> None:
+    response = VerifyResponse(
+        run_id="abc123def456",
+        status=RunStatus.COMPLETED,
+        issue=_issue(),
+        comments=[],
+        evidence_packet={
+            "problem_statement": "x",
+            "raw_report_text": "x",
+            "report_quality_hints": {
+                "has_body": True,
+                "has_repro_signals": True,
+                "comment_count": 0,
+                "label_count": 0,
+            },
+            "combined_text": "x",
+        },
+        verification_brief=_brief(),
+        verification_plan=_plan(),
+        verification_result=VerificationResult(
+            status=ResultStatus.SIMULATED,
+            outcome_summary="Completed via fallbacks.",
+            evidence=[],
+            execution_notes=[],
+            resilience_notes=["Parser and adapter fallbacks executed"],
+            confidence=BriefConfidence(level=ConfidenceLevel.LOW, reason="degraded"),
+        ),
+        adapter_used="fake",
+        primary_adapter_requested="getlark_live_check",
+        fallback_triggered=True,
+        parser_requested="truefoundry_gateway",
+        parser_used="deterministic",
+        parser_fallback_triggered=True,
+    )
+    assert compute_run_health(response) == "degraded-both"
+    headline = run_comment_headline(response)
+    assert headline is not None
+    assert "Degraded run" in headline
+    assert "parser and adapter" in headline.lower()
+
+
+def test_pick_workflow_with_source_prefers_env_id() -> None:
+    pick = pick_workflow_with_source(
+        [
+            GetLarkWorkflowRef(workflow_id="wflw_a", name="alpha"),
+            GetLarkWorkflowRef(workflow_id="wflw_b", name="beta"),
+        ],
+        workflow_id="wflw_b",
+        workflow_name=None,
+    )
+    assert pick.workflow_id == "wflw_b"
+    assert pick.selection_source == "env_id"
 
 
 def test_live_check_without_execution_id_gets_rest_sponsor_banner() -> None:

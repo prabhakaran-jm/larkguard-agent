@@ -102,6 +102,13 @@ class GetLarkInvokeResult:
     response_snippet: str
     workflow_id: str | None = None
     execution_id: str | None = None
+    workflow_selection_source: str | None = None
+
+
+@dataclass
+class WorkflowPickResult:
+    workflow_id: str | None
+    selection_source: str | None
 
 
 class GetLarkApiClient:
@@ -187,13 +194,16 @@ class GetLarkApiClient:
                 success=False,
                 summary="No workflow id available from /workflows response; skipped invoke attempt.",
                 response_snippet="{}",
+                workflow_selection_source="none",
             )
 
-        workflow_id = pick_workflow_id(
+        pick = pick_workflow_with_source(
             workflow_refs,
             workflow_id=GETLARK_WORKFLOW_ID,
             workflow_name=GETLARK_WORKFLOW_NAME,
         )
+        workflow_id = pick.workflow_id
+        selection_source = pick.selection_source
         if not workflow_id:
             return GetLarkInvokeResult(
                 attempted=False,
@@ -202,6 +212,7 @@ class GetLarkApiClient:
                 success=False,
                 summary="No matching workflow id for invoke attempt.",
                 response_snippet="{}",
+                workflow_selection_source=selection_source,
             )
         # Matches @getlark/cli: POST /workflows/{workflowId}/invoke with {}
         endpoint = f"{self._api_url}/workflows/{workflow_id}/invoke"
@@ -221,6 +232,8 @@ class GetLarkApiClient:
                 success=False,
                 summary=f"Invoke attempt failed with network error: {exc}",
                 response_snippet="{}",
+                workflow_id=workflow_id,
+                workflow_selection_source=selection_source,
             )
 
         snippet = response.text[:1200]
@@ -235,6 +248,8 @@ class GetLarkApiClient:
                     "preserved live-check behavior without failing verify."
                 ),
                 response_snippet=snippet,
+                workflow_id=workflow_id,
+                workflow_selection_source=selection_source,
             )
 
         execution_id = _extract_execution_id(response)
@@ -250,6 +265,7 @@ class GetLarkApiClient:
             response_snippet=snippet,
             workflow_id=workflow_id,
             execution_id=execution_id,
+            workflow_selection_source=selection_source,
         )
 
 
@@ -461,12 +477,11 @@ class GetLarkLiveCheckAdapter(LarkAdapter):
         issue: IssueSummary,
     ) -> VerificationResult:
         listing = self._client.list_workflows(limit=5)
+        invoke_enabled = (
+            GETLARK_ENABLE_WORKFLOW_INVOKE and plan.mode == PlanMode.LARK_WORKFLOW_CANDIDATE
+        )
         invoke = None
-        if (
-            GETLARK_ENABLE_WORKFLOW_INVOKE
-            and plan.mode == PlanMode.LARK_WORKFLOW_CANDIDATE
-            and listing.workflow_refs
-        ):
+        if invoke_enabled and listing.workflow_refs:
             invoke = self._client.invoke_workflow_best_effort(
                 plan=plan,
                 issue=issue,
@@ -507,6 +522,13 @@ class GetLarkLiveCheckAdapter(LarkAdapter):
                 ),
             ),
         ]
+        evidence.extend(
+            _workflow_invoke_evidence(
+                listing.workflow_refs,
+                invoke=invoke,
+                invoke_enabled=invoke_enabled,
+            )
+        )
         extra_notes = [
             f"Real getlark API call: GET {listing.endpoint}",
             "This confirms API key and connectivity, not bug reproduction",
@@ -1048,6 +1070,27 @@ def _summarize_workflow_list(payload: Any) -> tuple[int, str]:
     return len(items), f"{len(items)} workflow(s) returned"
 
 
+def pick_workflow_with_source(
+    workflow_refs: list[GetLarkWorkflowRef],
+    *,
+    workflow_id: str | None,
+    workflow_name: str | None,
+) -> WorkflowPickResult:
+    """Select workflow id and record how it was chosen (for deterministic demos)."""
+    if workflow_id:
+        for ref in workflow_refs:
+            if ref.workflow_id == workflow_id:
+                return WorkflowPickResult(workflow_id, "env_id")
+        return WorkflowPickResult(workflow_id, "env_id")
+    if workflow_name:
+        for ref in workflow_refs:
+            if ref.name and ref.name == workflow_name:
+                return WorkflowPickResult(ref.workflow_id, "env_name")
+    if workflow_refs:
+        return WorkflowPickResult(workflow_refs[0].workflow_id, "first_listed")
+    return WorkflowPickResult(None, "none")
+
+
 def pick_workflow_id(
     workflow_refs: list[GetLarkWorkflowRef],
     *,
@@ -1055,18 +1098,71 @@ def pick_workflow_id(
     workflow_name: str | None,
 ) -> str | None:
     """Select a workflow id for invoke using env overrides, then first listed workflow."""
-    if workflow_id:
-        for ref in workflow_refs:
-            if ref.workflow_id == workflow_id:
-                return ref.workflow_id
-        return workflow_id
-    if workflow_name:
-        for ref in workflow_refs:
-            if ref.name and ref.name == workflow_name:
-                return ref.workflow_id
-    if workflow_refs:
-        return workflow_refs[0].workflow_id
-    return None
+    return pick_workflow_with_source(
+        workflow_refs,
+        workflow_id=workflow_id,
+        workflow_name=workflow_name,
+    ).workflow_id
+
+
+def describe_invoke_status(
+    invoke: GetLarkInvokeResult | None,
+    *,
+    invoke_enabled: bool,
+    has_workflows: bool,
+) -> str:
+    if not invoke_enabled:
+        return "disabled"
+    if not has_workflows:
+        return "no_workflows"
+    if invoke is None:
+        return "not_attempted"
+    if not invoke.attempted:
+        return "skipped"
+    if invoke.success:
+        return "success"
+    return "failed"
+
+
+def _workflow_invoke_evidence(
+    workflow_refs: list[GetLarkWorkflowRef],
+    *,
+    invoke: GetLarkInvokeResult | None,
+    invoke_enabled: bool,
+) -> list[ExecutionArtifact]:
+    pick = pick_workflow_with_source(
+        workflow_refs,
+        workflow_id=GETLARK_WORKFLOW_ID,
+        workflow_name=GETLARK_WORKFLOW_NAME,
+    )
+    selected = invoke.workflow_id if invoke and invoke.workflow_id else pick.workflow_id
+    source = (
+        invoke.workflow_selection_source
+        if invoke and invoke.workflow_selection_source
+        else pick.selection_source
+    )
+    artifacts = [
+        ExecutionArtifact(
+            kind=ArtifactKind.NOTE,
+            label="workflow_selected",
+            content=selected or "(none)",
+        ),
+        ExecutionArtifact(
+            kind=ArtifactKind.NOTE,
+            label="workflow_selection_source",
+            content=source or "none",
+        ),
+        ExecutionArtifact(
+            kind=ArtifactKind.NOTE,
+            label="invoke_status",
+            content=describe_invoke_status(
+                invoke,
+                invoke_enabled=invoke_enabled,
+                has_workflows=bool(workflow_refs),
+            ),
+        ),
+    ]
+    return artifacts
 
 
 def run_getlark_cli_list_best_effort() -> GetLarkCliListResult:

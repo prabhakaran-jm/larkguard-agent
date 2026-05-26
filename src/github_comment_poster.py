@@ -6,6 +6,7 @@ from typing import Any, Literal
 import httpx
 
 from src.config import COMMENT_ONLY_ON_COMPLETED, ENABLE_GITHUB_COMMENTS, fault_injection_mode
+from src.evidence_utils import evidence_content
 from src.models import CommentSummary, ResultStatus, RunStatus, VerificationResult, VerifyResponse
 from src.run_health import run_comment_headline
 
@@ -89,6 +90,15 @@ def render_verification_comment(response: VerifyResponse) -> str:
     status_lines = [f"- **Status:** {status_label}"]
     if execution_id_artifact is not None:
         status_lines.append(f"- **Execution proof:** `{execution_id_artifact.content}`")
+    workflow_selected = evidence_content(result, "workflow_selected")
+    workflow_source = evidence_content(result, "workflow_selection_source")
+    invoke_status = evidence_content(result, "invoke_status")
+    if workflow_selected is not None:
+        status_lines.append(f"- **Workflow selected:** `{workflow_selected}`")
+    if workflow_source is not None:
+        status_lines.append(f"- **Selection source:** `{workflow_source}`")
+    if invoke_status is not None:
+        status_lines.append(f"- **Invoke status:** `{invoke_status}`")
     if response.primary_adapter_requested:
         status_lines.append(
             f"- **Primary requested:** `{response.primary_adapter_requested}`"

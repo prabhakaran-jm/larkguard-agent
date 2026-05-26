@@ -11,6 +11,7 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
+from src.evidence_utils import evidence_content
 from src.models import ReplayRequest, VerifyRequest, VerifyResponse
 from src.run_health import compute_run_health, format_health_summary_line
 from src.service import ServiceError, VerificationService
@@ -221,6 +222,15 @@ def _print_verify_summary(result: VerifyResponse) -> None:
         execution_id = _execution_id_from_result(result)
         if execution_id:
             console.print(f"[bold green]Execution proof:[/bold green] `{execution_id}`")
+        workflow_selected = evidence_content(result.verification_result, "workflow_selected")
+        workflow_source = evidence_content(result.verification_result, "workflow_selection_source")
+        invoke_status = evidence_content(result.verification_result, "invoke_status")
+        if workflow_selected:
+            console.print(f"[bold]Workflow selected:[/bold] `{workflow_selected}`")
+        if workflow_source:
+            console.print(f"[dim]Selection source:[/dim] {workflow_source}")
+        if invoke_status:
+            console.print(f"[dim]Invoke status:[/dim] {invoke_status}")
         if result.fallback_triggered:
             console.print(
                 "[yellow]Degraded:[/yellow] fallback from "
@@ -323,6 +333,9 @@ def _render_demo_summary(result: VerifyResponse) -> str:
         timing.append(f"adapter={result.adapter_duration_ms}ms")
     timing_text = ", ".join(timing) if timing else "n/a"
     execution_id = _execution_id_from_result(result)
+    workflow_selected = evidence_content(result.verification_result, "workflow_selected")
+    workflow_source = evidence_content(result.verification_result, "workflow_selection_source")
+    invoke_status = evidence_content(result.verification_result, "invoke_status")
 
     lines = [
         f"# LarkGuard Demo Summary ({result.run_id})",
@@ -332,6 +345,12 @@ def _render_demo_summary(result: VerifyResponse) -> str:
     ]
     if execution_id:
         lines.append(f"- Execution proof: `{execution_id}`")
+    if workflow_selected:
+        lines.append(f"- Workflow selected: `{workflow_selected}`")
+    if workflow_source:
+        lines.append(f"- Selection source: `{workflow_source}`")
+    if invoke_status:
+        lines.append(f"- Invoke status: `{invoke_status}`")
     lines.extend(
         [
             f"- Workflow: `{workflow}`",

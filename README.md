@@ -141,8 +141,8 @@ PRIMARY_ADAPTER_MODE=getlark_live_check
 GETLARK_STRICT_MODE=false    # true = fail verify on live API error (no fake fallback)
 GETLARK_TIMEOUT_SECONDS=15
 GETLARK_ENABLE_WORKFLOW_INVOKE=false  # true = attempt one real workflow invoke after list
-GETLARK_WORKFLOW_NAME=larkguard-smoke # optional: pick workflow by name for invoke
-# GETLARK_WORKFLOW_ID=wflw_...       # optional: pick workflow by id (overrides name)
+GETLARK_WORKFLOW_ID=wflw_your_smoke_workflow_id  # preferred: deterministic invoke target
+# GETLARK_WORKFLOW_NAME=larkguard-smoke          # used when WORKFLOW_ID is unset
 GETLARK_ENABLE_CLI_LIVE=false        # true = also run `getlark workflows list` on live_check runs
 GETLARK_CLI_BIN=getlark              # path to @getlark/cli binary
 ```
@@ -260,17 +260,19 @@ Re-run the same issue to see `GitHub comment: updated` in the CLI.
 
 Full-stack path for judges: TrueFoundry gateway parser + live getlark list/invoke + real execution ID.
 
-**Prerequisites:** `GETLARK_API_KEY` in `.env`, a workflow on your getlark account (e.g. `larkguard-smoke`), and TrueFoundry gateway env vars if using the gateway parser.
+**Prerequisites:** `GETLARK_API_KEY` in `.env`, a workflow on your getlark account (copy its `wflw_*` id into `GETLARK_WORKFLOW_ID`), and TrueFoundry gateway env vars if using the gateway parser.
 
 ```bash
 PRIMARY_ADAPTER_MODE=getlark_live_check \
 GETLARK_ENABLE_WORKFLOW_INVOKE=true \
 GETLARK_ENABLE_CLI_LIVE=true \
-GETLARK_WORKFLOW_NAME=larkguard-smoke \
+GETLARK_WORKFLOW_ID=wflw_PThpADVZrGzDczLF4I24c9uZ \
 PARSER_MODE=truefoundry_gateway \
 FAULT_INJECTION_MODE=none \
 python -m src.cli verify --issue-number 2 --local
 ```
+
+Replace `GETLARK_WORKFLOW_ID` with your smoke workflow id from `getlark workflows list`.
 
 **Judge-friendly replay** (after a run completes):
 
@@ -278,17 +280,52 @@ python -m src.cli verify --issue-number 2 --local
 python -m src.cli demo-summary --run-id <run_id> --local
 ```
 
-**Expected highlights (CLI summary):**
+**Expected CLI output (abbreviated):**
 
 ```
+Verification complete — run_id=abc123def456
 Health=healthy · Lark=getlark_live_check · Parser=truefoundry_gateway
 Result: reproduced · workflow `github_issue_verification` · adapter `getlark_live_check`
 Execution proof: `wflw_exec_…`
+Workflow selected: `wflw_PThpADVZrGzDczLF4I24c9uZ`
+Selection source: env_id
+Invoke status: success
 ```
 
-The managed GitHub comment shows **Status: Reproduced (live getlark workflow execution proof — not target-app reproduction)** when invoke succeeds — proof that a real getlark workflow ran, not that the issue's app bug was reproduced end-to-end.
+**Expected managed GitHub comment (key lines):**
+
+```
+> **Live sponsor run** — getlark execution proof captured.
+- **Status:** Reproduced (live getlark workflow execution proof — not target-app reproduction)
+- **Execution proof:** `wflw_exec_… (workflow wflw_…)`
+- **Workflow selected:** `wflw_…`
+- **Selection source:** `env_id`
+- **Invoke status:** `success`
+```
+
+The managed comment explicitly states that **Reproduced** means live getlark workflow execution proof — not target-app bug reproduction.
 
 Without `GETLARK_ENABLE_WORKFLOW_INVOKE=true`, the same command completes with `status: simulated` (list-only live check).
+
+### Resilience demos (TrueFoundry + adapter fallbacks)
+
+| Health | Meaning | Demo command |
+|--------|---------|--------------|
+| `healthy` | No parser or adapter fallback | Canonical sponsor command above |
+| `degraded-parser` | TrueFoundry gateway failed → deterministic parser | `PARSER_MODE=truefoundry_gateway` with `TRUEFOUNDRY_API_KEY` unset |
+| `degraded-adapter` | Live getlark adapter failed → fake executor | `PRIMARY_ADAPTER_MODE=getlark_live_check` + invalid `GETLARK_API_KEY` |
+| `degraded-both` | Parser and adapter both fell back | `PARSER_MODE=truefoundry_gateway` + invalid keys + `FAULT_INJECTION_MODE=none` |
+
+**Degraded-both demo** (screenshot target — both fallbacks visible in CLI + comment):
+
+```bash
+PARSER_MODE=truefoundry_gateway TRUEFOUNDRY_API_KEY= \
+PRIMARY_ADAPTER_MODE=getlark_live_check GETLARK_API_KEY=invalid \
+FAULT_INJECTION_MODE=none \
+python -m src.cli verify --issue-number 2 --local
+```
+
+Expect: `Health=degraded-both`, parser fallback line, adapter fallback line, comment banner mentioning both fallbacks.
 
 ### Demo assets (screenshots / video)
 
@@ -296,7 +333,7 @@ Capture these for Devpost:
 
 1. **CLI** — `demo-summary` showing `Health=healthy`, `Execution proof`, timings.
 2. **GitHub comment** — managed comment with **Live sponsor run** banner and honest Reproduced qualifier.
-3. **Degraded run** — `FAULT_INJECTION_MODE=force_adapter_failure` showing fallback banner.
+3. **Degraded run** — `degraded-both` or `force_adapter_failure` showing fallback banner.
 4. **Run store** — `.larkguard_runs/` + `python -m src.cli replay --run-id … --local`.
 
 Do not screenshot private repo issues or tokens. Never commit `.env` or run JSON with secrets.
@@ -311,14 +348,17 @@ source .venv/bin/activate
 # 2. Install dependencies
 pip install -r requirements.txt
 
-# 3. Configure environment
+# 3. Run tests (use project venv so deps are always found)
+.venv/bin/pytest -q tests/test_larkguard_core.py
+
+# 4. Configure environment
 cp .env.example .env
 # Edit .env and set GITHUB_TOKEN (required) and optional GITHUB_OWNER / GITHUB_REPO
 
-# 4. Start the API
+# 5. Start the API
 uvicorn src.main:app --reload
 
-# 5. In another terminal, verify an issue (uses env defaults if owner/repo omitted)
+# 6. In another terminal, verify an issue (uses env defaults if owner/repo omitted)
 python -m src.cli verify --issue-number 1 --local
 # Add --json only when you need the full VerifyResponse payload
 
@@ -327,7 +367,7 @@ curl -X POST http://127.0.0.1:8000/verify \
   -H "Content-Type: application/json" \
   -d '{"issue_number": 1, "owner": "your-org", "repo": "your-repo"}'
 
-# 6. Inspect stored runs
+# 7. Inspect stored runs
 python -m src.cli runs --local
 ls .larkguard_runs/
 ```
