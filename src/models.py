@@ -116,6 +116,9 @@ class VerificationBrief(BaseModel):
     signals: BriefSignals
     confidence: BriefConfidence
     recommended_verification_mode: VerificationMode
+    # Parser provenance (deterministic baseline vs optional TrueFoundry gateway)
+    parser_source: str = "deterministic"
+    parser_notes: list[str] = Field(default_factory=list)
 
 
 class PlanMode(str, Enum):
@@ -183,6 +186,9 @@ class VerifyResponse(BaseModel):
     adapter_used: str | None = None
     primary_adapter_requested: str | None = None
     fallback_triggered: bool = False
+    parser_requested: str | None = None
+    parser_used: str | None = None
+    parser_fallback_triggered: bool = False
 
 
 class RunInputParams(BaseModel):

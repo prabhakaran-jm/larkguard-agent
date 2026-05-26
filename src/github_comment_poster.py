@@ -91,6 +91,13 @@ def render_verification_comment(response: VerifyResponse) -> str:
         lines.append(
             f"- **Fallback:** yes (`{response.primary_adapter_requested}` → `{adapter}`)"
         )
+    if response.parser_used:
+        lines.append(f"- **Parser:** `{response.parser_used}`")
+        if response.parser_fallback_triggered:
+            lines.append(
+                f"- **Parser fallback:** yes (`{response.parser_requested}` → "
+                f"`{response.parser_used}`)"
+            )
 
     lines.extend(["", result.outcome_summary, "", "**Evidence**"])
     if result.evidence:

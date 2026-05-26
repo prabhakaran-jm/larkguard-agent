@@ -9,6 +9,7 @@ from src.config import (
     effective_primary_adapter_mode,
     fault_injection_mode,
     getlark_strict_mode,
+    parser_mode,
     require_github_token,
 )
 from src.github_client import (
@@ -46,12 +47,13 @@ from src.models import (
     RunSummary,
     StoredRun,
     TriggerType,
+    VerificationBrief,
     VerificationPlan,
     VerificationResult,
     VerifyRequest,
     VerifyResponse,
 )
-from src.parser import Parser, default_parser
+from src.parser import GatewayParseFailedError, Parser, resolve_parser
 from src.run_store import RunNotFoundError, RunStore
 
 # TODO: resilience_gateway module — wrap adapter execution with richer fallback policies
@@ -96,7 +98,7 @@ class VerificationService:
     ) -> None:
         self.run_store = run_store or RunStore()
         self._github_client = github_client
-        self._parser = parser or default_parser()
+        self._parser = parser or resolve_parser()
         self._lark_adapter_override = lark_adapter
         self._comment_poster = comment_poster
 
@@ -423,9 +425,11 @@ class VerificationService:
             combined_text=combined_text,
             recommended_next_step="parse_with_llm",
         )
-        brief = self._parser.parse(issue, comments, evidence)
+        brief = self._parse_verification_brief(issue, comments, evidence)
+        parser_requested, parser_used, parser_fallback = self._parser_run_metadata(brief)
         plan = plan_verification(brief)
         execution = self._execute_with_adapter(plan, brief, issue)
+        result = self._apply_parser_provenance(execution.result, brief, parser_fallback)
         return VerifyResponse(
             run_id=run_id,
             status=RunStatus.COMPLETED,
@@ -434,10 +438,13 @@ class VerificationService:
             evidence_packet=evidence,
             verification_brief=brief,
             verification_plan=plan,
-            verification_result=execution.result,
+            verification_result=result,
             adapter_used=execution.adapter_used,
             primary_adapter_requested=execution.primary_adapter_requested,
             fallback_triggered=execution.fallback_triggered,
+            parser_requested=parser_requested,
+            parser_used=parser_used,
+            parser_fallback_triggered=parser_fallback,
         )
 
     def _ensure_full_payload(self, run: StoredRun) -> VerifyResponse:
@@ -447,10 +454,18 @@ class VerificationService:
 
         updated = False
         if payload.verification_brief is None:
-            brief = self._parser.parse(
+            brief = self._parse_verification_brief(
                 payload.issue, payload.comments, payload.evidence_packet
             )
-            payload = payload.model_copy(update={"verification_brief": brief})
+            parser_requested, parser_used, parser_fallback = self._parser_run_metadata(brief)
+            payload = payload.model_copy(
+                update={
+                    "verification_brief": brief,
+                    "parser_requested": parser_requested,
+                    "parser_used": parser_used,
+                    "parser_fallback_triggered": parser_fallback,
+                }
+            )
             updated = True
 
         if payload.verification_brief is not None and payload.verification_plan is None:
@@ -468,12 +483,22 @@ class VerificationService:
                 payload.verification_brief,
                 payload.issue,
             )
+            brief = payload.verification_brief
+            parser_fallback = payload.parser_fallback_triggered
+            if brief is not None:
+                parser_fallback = self._parser_run_metadata(brief)[2]
+            result = execution.result
+            if brief is not None:
+                result = self._apply_parser_provenance(
+                    result, brief, parser_fallback
+                )
             payload = payload.model_copy(
                 update={
-                    "verification_result": execution.result,
+                    "verification_result": result,
                     "adapter_used": execution.adapter_used,
                     "primary_adapter_requested": execution.primary_adapter_requested,
                     "fallback_triggered": execution.fallback_triggered,
+                    "parser_fallback_triggered": parser_fallback,
                 }
             )
             updated = True
@@ -482,6 +507,58 @@ class VerificationService:
             run.normalized_payload = payload
             self.run_store.save(run)
         return payload
+
+    def _parse_verification_brief(
+        self,
+        issue: IssueSummary,
+        comments: list[CommentSummary],
+        evidence: EvidencePacket,
+    ):
+        try:
+            return self._parser.parse(issue, comments, evidence)
+        except GatewayParseFailedError as exc:
+            raise ServiceError(
+                str(exc),
+                error_type="truefoundry_parser_failed",
+                status_code=502,
+            ) from exc
+
+    @staticmethod
+    def _parser_run_metadata(brief) -> tuple[str, str, bool]:
+        requested = parser_mode()
+        used = brief.parser_source or "deterministic"
+        fallback = requested == "truefoundry_gateway" and used == "deterministic"
+        return requested, used, fallback
+
+    @staticmethod
+    def _apply_parser_provenance(
+        result: VerificationResult,
+        brief,
+        parser_fallback: bool,
+    ) -> VerificationResult:
+        """Attach parser provenance to execution metadata (does not change adapter output)."""
+        execution_notes = list(result.execution_notes)
+        for note in brief.parser_notes:
+            line = f"Parser: {note}"
+            if line not in execution_notes:
+                execution_notes.append(line)
+        if brief.parser_source == "truefoundry_gateway":
+            line = "Parser: verification_brief produced via TrueFoundry AI Gateway"
+            if line not in execution_notes:
+                execution_notes.append(line)
+
+        resilience_notes = list(result.resilience_notes)
+        if parser_fallback:
+            msg = "Parser fallback: TrueFoundry gateway → DeterministicParser"
+            if msg not in resilience_notes:
+                resilience_notes.append(msg)
+
+        return result.model_copy(
+            update={
+                "execution_notes": execution_notes,
+                "resilience_notes": resilience_notes,
+            }
+        )
 
     @staticmethod
     def _build_raw_report_text(issue: IssueSummary, comments: list[CommentSummary]) -> str:

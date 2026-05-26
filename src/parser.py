@@ -1,8 +1,22 @@
 from __future__ import annotations
 
+import json
 import re
 from abc import ABC, abstractmethod
+from typing import Any
 
+import httpx
+from pydantic import BaseModel, Field, ValidationError
+
+from src.config import (
+    TRUEFOUNDRY_API_KEY,
+    TRUEFOUNDRY_GATEWAY_BASE_URL,
+    TRUEFOUNDRY_MODEL,
+    TRUEFOUNDRY_TIMEOUT_SECONDS,
+    parser_mode,
+    truefoundry_credentials_complete,
+    truefoundry_strict_mode,
+)
 from src.models import (
     BriefClassification,
     BriefConfidence,
@@ -15,9 +29,8 @@ from src.models import (
     VerificationMode,
 )
 
-# TODO: LLMParser — same interface, backed by an LLM for ambiguous reports
-# TODO: fallback parser chain — try LLMParser, fall back to DeterministicParser on outage
-# TODO: fault_injection — simulate parser failures for resilience demos
+# TrueFoundryGatewayParser — optional OpenAI-compatible chat completions (parser layer only)
+# TODO: fault_injection — simulate parser/gateway failures for resilience demos
 
 SECTION_PATTERNS: dict[str, re.Pattern[str]] = {
     "repro": re.compile(
@@ -98,6 +111,7 @@ class DeterministicParser(Parser):
             signals=signals,
             confidence=confidence,
             recommended_verification_mode=mode,
+            parser_source="deterministic",
         )
 
     def _detect_signals(self, text: str) -> BriefSignals:
@@ -264,5 +278,323 @@ class DeterministicParser(Parser):
         return f"{title} — classified as {classification.value}; {step_note}"
 
 
-def default_parser() -> Parser:
+class GatewayParseFailedError(Exception):
+    """Raised when TrueFoundry gateway parsing cannot complete (strict mode)."""
+
+
+class _GatewayBriefPayload(BaseModel):
+    summary: str = ""
+    classification: str = ""
+    reproduction_steps: list[str] = Field(default_factory=list)
+    expected_behavior: str = ""
+    actual_behavior: str = ""
+    missing_information: list[str] = Field(default_factory=list)
+    signals: dict[str, Any] = Field(default_factory=dict)
+    confidence: dict[str, Any] = Field(default_factory=dict)
+    recommended_verification_mode: str = ""
+
+
+_SYSTEM_PROMPT = """You extract bug-report structure for automated verification.
+Respond with ONLY a single JSON object (no markdown, no code fences) matching this schema:
+{
+  "summary": "string",
+  "classification": "reproducible_candidate|blocked_missing_info|unclear",
+  "reproduction_steps": ["string"],
+  "expected_behavior": "string",
+  "actual_behavior": "string",
+  "missing_information": ["string"],
+  "signals": {
+    "has_numbered_steps": true,
+    "has_expected_behavior": true,
+    "has_actual_behavior": true,
+    "has_error_message": true,
+    "has_environment_details": true
+  },
+  "confidence": {"level": "low|medium|high", "reason": "string"},
+  "recommended_verification_mode": "manual_review|lark_workflow_candidate"
+}
+Be concise. Use empty strings/lists when unknown. Do not invent reproduction steps not supported by the report."""
+
+
+def _chat_completions_url(base_url: str) -> str:
+    base = base_url.rstrip("/")
+    if base.endswith("/chat/completions"):
+        return base
+    return f"{base}/chat/completions"
+
+
+def _extract_message_content(payload: dict[str, Any]) -> str:
+    choices = payload.get("choices")
+    if not isinstance(choices, list) or not choices:
+        raise GatewayParseFailedError("Gateway response missing choices")
+    message = choices[0].get("message") if isinstance(choices[0], dict) else None
+    if not isinstance(message, dict):
+        raise GatewayParseFailedError("Gateway response missing message")
+    content = message.get("content")
+    if not isinstance(content, str) or not content.strip():
+        raise GatewayParseFailedError("Gateway response missing message content")
+    return content.strip()
+
+
+def _parse_json_from_content(content: str) -> dict[str, Any]:
+    text = content.strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"\s*```$", "", text)
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise GatewayParseFailedError(f"Gateway returned invalid JSON: {exc}") from exc
+    if not isinstance(parsed, dict):
+        raise GatewayParseFailedError("Gateway JSON must be an object")
+    return parsed
+
+
+def _coerce_classification(value: str) -> BriefClassification:
+    normalized = value.strip().lower().replace("-", "_").replace(" ", "_")
+    for candidate in BriefClassification:
+        if normalized == candidate.value:
+            return candidate
+    aliases = {
+        "reproducible": BriefClassification.REPRODUCIBLE_CANDIDATE,
+        "blocked": BriefClassification.BLOCKED_MISSING_INFO,
+        "missing_info": BriefClassification.BLOCKED_MISSING_INFO,
+    }
+    return aliases.get(normalized, BriefClassification.UNCLEAR)
+
+
+def _coerce_verification_mode(value: str) -> VerificationMode:
+    normalized = value.strip().lower().replace("-", "_")
+    for candidate in VerificationMode:
+        if normalized == candidate.value:
+            return candidate
+    if "lark" in normalized or "workflow" in normalized:
+        return VerificationMode.LARK_WORKFLOW_CANDIDATE
+    return VerificationMode.MANUAL_REVIEW
+
+
+def _coerce_confidence_level(value: str) -> ConfidenceLevel:
+    normalized = value.strip().lower()
+    for candidate in ConfidenceLevel:
+        if normalized == candidate.value:
+            return candidate
+    return ConfidenceLevel.MEDIUM
+
+
+def _coerce_signals(raw: dict[str, Any]) -> BriefSignals:
+    def as_bool(key: str) -> bool:
+        value = raw.get(key, False)
+        return bool(value) if isinstance(value, bool) else str(value).lower() in ("true", "1", "yes")
+
+    return BriefSignals(
+        has_numbered_steps=as_bool("has_numbered_steps"),
+        has_expected_behavior=as_bool("has_expected_behavior"),
+        has_actual_behavior=as_bool("has_actual_behavior"),
+        has_error_message=as_bool("has_error_message"),
+        has_environment_details=as_bool("has_environment_details"),
+    )
+
+
+def _gateway_payload_to_brief(data: dict[str, Any]) -> VerificationBrief:
+    try:
+        payload = _GatewayBriefPayload.model_validate(data)
+    except ValidationError as exc:
+        raise GatewayParseFailedError(f"Gateway JSON schema invalid: {exc}") from exc
+
+    confidence_raw = payload.confidence if isinstance(payload.confidence, dict) else {}
+    level = _coerce_confidence_level(str(confidence_raw.get("level", "medium")))
+    reason = str(confidence_raw.get("reason", "")).strip() or (
+        "Structured by TrueFoundry AI Gateway parser."
+    )
+
+    summary = payload.summary.strip()
+    if not summary:
+        raise GatewayParseFailedError("Gateway JSON missing summary")
+
+    classification = _coerce_classification(payload.classification)
+    reproduction_steps = [s.strip() for s in payload.reproduction_steps if s.strip()][:12]
+    recommended_mode = _coerce_verification_mode(payload.recommended_verification_mode)
+    parser_notes = ["Brief produced by TrueFoundry AI Gateway chat completions."]
+    if (
+        classification == BriefClassification.REPRODUCIBLE_CANDIDATE
+        and reproduction_steps
+        and recommended_mode == VerificationMode.MANUAL_REVIEW
+    ):
+        # Tiny deterministic guardrail for demo stability: reproducible + steps should prefer workflow candidate.
+        recommended_mode = VerificationMode.LARK_WORKFLOW_CANDIDATE
+        parser_notes.append(
+            "Guardrail applied: coerced recommended_verification_mode to "
+            "lark_workflow_candidate for reproducible candidate with steps."
+        )
+
+    return VerificationBrief(
+        summary=summary,
+        classification=classification,
+        reproduction_steps=reproduction_steps,
+        expected_behavior=payload.expected_behavior.strip()[:2000],
+        actual_behavior=payload.actual_behavior.strip()[:2000],
+        missing_information=[m.strip() for m in payload.missing_information if m.strip()][:12],
+        signals=_coerce_signals(payload.signals),
+        confidence=BriefConfidence(level=level, reason=reason),
+        recommended_verification_mode=recommended_mode,
+        parser_source="truefoundry_gateway",
+        parser_notes=parser_notes,
+    )
+
+
+class TrueFoundryGatewayClient:
+    """Minimal OpenAI-compatible client for TrueFoundry AI Gateway."""
+
+    def __init__(
+        self,
+        api_key: str,
+        base_url: str,
+        model: str,
+        timeout_seconds: float = TRUEFOUNDRY_TIMEOUT_SECONDS,
+    ) -> None:
+        self._api_key = api_key
+        self._endpoint = _chat_completions_url(base_url)
+        self._model = model
+        self._timeout = timeout_seconds
+
+    def parse_report(self, combined_text: str) -> VerificationBrief:
+        user_content = combined_text.strip()
+        if len(user_content) > 12000:
+            user_content = user_content[:12000] + "\n\n[truncated for gateway parser]"
+
+        body = {
+            "model": self._model,
+            "messages": [
+                {"role": "system", "content": _SYSTEM_PROMPT},
+                {
+                    "role": "user",
+                    "content": (
+                        "Parse this GitHub bug report evidence into the JSON schema:\n\n"
+                        f"{user_content}"
+                    ),
+                },
+            ],
+            "temperature": 0.1,
+        }
+        headers = {
+            "Authorization": f"Bearer {self._api_key}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
+        try:
+            with httpx.Client(timeout=self._timeout) as client:
+                response = client.post(self._endpoint, headers=headers, json=body)
+        except httpx.RequestError as exc:
+            raise GatewayParseFailedError(
+                f"Network error calling TrueFoundry gateway: {exc}"
+            ) from exc
+
+        if response.status_code in {401, 403}:
+            raise GatewayParseFailedError(
+                f"TrueFoundry gateway rejected credentials (HTTP {response.status_code})"
+            )
+        if response.status_code == 404:
+            raise GatewayParseFailedError(
+                f"TrueFoundry gateway endpoint not found (HTTP 404) at {self._endpoint}"
+            )
+        if response.status_code >= 500:
+            raise GatewayParseFailedError(
+                f"TrueFoundry gateway server error (HTTP {response.status_code})"
+            )
+        if response.status_code >= 400:
+            raise GatewayParseFailedError(
+                f"TrueFoundry gateway error (HTTP {response.status_code}): "
+                f"{response.text[:200]}"
+            )
+
+        try:
+            response_payload: Any = response.json()
+        except ValueError as exc:
+            raise GatewayParseFailedError("TrueFoundry gateway returned non-JSON") from exc
+
+        content = _extract_message_content(response_payload)
+        data = _parse_json_from_content(content)
+        return _gateway_payload_to_brief(data)
+
+
+class TrueFoundryGatewayParser(Parser):
+    """
+    Optional parser: one chat-completions call via TrueFoundry AI Gateway.
+    Falls back to DeterministicParser unless TRUEFOUNDRY_STRICT_MODE=true.
+    """
+
+    def __init__(
+        self,
+        fallback: DeterministicParser | None = None,
+        client: TrueFoundryGatewayClient | None = None,
+    ) -> None:
+        self._fallback = fallback or DeterministicParser()
+        self._client = client
+
+    def parse(
+        self,
+        issue: IssueSummary,
+        comments: list[CommentSummary],
+        evidence: EvidencePacket,
+    ) -> VerificationBrief:
+        if not truefoundry_credentials_complete():
+            message = (
+                "TrueFoundry gateway parser requested but "
+                "TRUEFOUNDRY_API_KEY, TRUEFOUNDRY_GATEWAY_BASE_URL, or TRUEFOUNDRY_MODEL is missing"
+            )
+            if truefoundry_strict_mode():
+                raise GatewayParseFailedError(message)
+            return self._fallback_with_note(
+                issue, comments, evidence, message
+            )
+
+        client = self._client or TrueFoundryGatewayClient(
+            api_key=TRUEFOUNDRY_API_KEY,
+            base_url=TRUEFOUNDRY_GATEWAY_BASE_URL,
+            model=TRUEFOUNDRY_MODEL,
+        )
+        try:
+            return client.parse_report(evidence.combined_text)
+        except GatewayParseFailedError as exc:
+            if truefoundry_strict_mode():
+                raise
+            return self._fallback_with_note(issue, comments, evidence, str(exc))
+
+    def _fallback_with_note(
+        self,
+        issue: IssueSummary,
+        comments: list[CommentSummary],
+        evidence: EvidencePacket,
+        error: str,
+    ) -> VerificationBrief:
+        brief = self._fallback.parse(issue, comments, evidence)
+        notes = list(brief.parser_notes)
+        notes.insert(
+            0,
+            f"TrueFoundry gateway parser failed ({error}); used DeterministicParser.",
+        )
+        confidence = brief.confidence.model_copy(
+            update={
+                "reason": (
+                    f"{brief.confidence.reason} "
+                    f"(Parser fallback: TrueFoundry gateway unavailable — {error[:120]})"
+                ).strip()
+            }
+        )
+        return brief.model_copy(
+            update={
+                "parser_source": "deterministic",
+                "parser_notes": notes,
+                "confidence": confidence,
+            }
+        )
+
+
+def resolve_parser() -> Parser:
+    if parser_mode() == "truefoundry_gateway":
+        return TrueFoundryGatewayParser()
     return DeterministicParser()
+
+
+def default_parser() -> Parser:
+    return resolve_parser()

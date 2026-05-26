@@ -198,6 +198,16 @@ def _print_verify_summary(result: VerifyResponse) -> None:
                 "[yellow]Degraded:[/yellow] fallback from "
                 f"`{result.primary_adapter_requested}` → `{result.adapter_used}`"
             )
+    if result.parser_used:
+        if result.parser_fallback_triggered:
+            console.print(
+                "[yellow]Parser:[/yellow] fallback "
+                f"`{result.parser_requested}` → `{result.parser_used}`"
+            )
+        elif result.parser_used == "truefoundry_gateway":
+            console.print(
+                f"[green]Parser:[/green] `{result.parser_used}` (TrueFoundry gateway)"
+            )
     if result.comment_action:
         label = "cyan" if result.comment_action == "updated" else "green"
         console.print(

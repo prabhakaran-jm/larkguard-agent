@@ -85,3 +85,35 @@ def fault_injection_mode() -> str:
 
 def getlark_strict_mode() -> bool:
     return GETLARK_STRICT_MODE
+
+
+# Parser (optional TrueFoundry AI Gateway)
+PARSER_MODE = os.getenv("PARSER_MODE", "deterministic").strip().lower()
+TRUEFOUNDRY_API_KEY = os.getenv("TRUEFOUNDRY_API_KEY", "").strip()
+TRUEFOUNDRY_GATEWAY_BASE_URL = os.getenv("TRUEFOUNDRY_GATEWAY_BASE_URL", "").strip().rstrip("/")
+TRUEFOUNDRY_MODEL = os.getenv("TRUEFOUNDRY_MODEL", "").strip()
+TRUEFOUNDRY_STRICT_MODE = os.getenv("TRUEFOUNDRY_STRICT_MODE", "false").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+)
+try:
+    TRUEFOUNDRY_TIMEOUT_SECONDS = float(os.getenv("TRUEFOUNDRY_TIMEOUT_SECONDS", "20"))
+except ValueError:
+    TRUEFOUNDRY_TIMEOUT_SECONDS = 20.0
+
+_VALID_PARSER_MODES = frozenset({"deterministic", "truefoundry_gateway"})
+
+
+def parser_mode() -> str:
+    if PARSER_MODE in _VALID_PARSER_MODES:
+        return PARSER_MODE
+    return "deterministic"
+
+
+def truefoundry_credentials_complete() -> bool:
+    return bool(TRUEFOUNDRY_API_KEY and TRUEFOUNDRY_GATEWAY_BASE_URL and TRUEFOUNDRY_MODEL)
+
+
+def truefoundry_strict_mode() -> bool:
+    return TRUEFOUNDRY_STRICT_MODE

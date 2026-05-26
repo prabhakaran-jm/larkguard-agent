@@ -45,11 +45,11 @@ Bug reports are noisy. Maintainers waste time guessing whether an issue is actio
 - `demo-issue-text` CLI helper for seed issues
 - Compact comment layout + richer verify CLI summary
 
-**Not yet:** Full getlark workflow invoke for bug reproduction, LLM parsing, TrueFoundry gateway, auth, database, or webhooks.
+**Not yet:** Full getlark workflow invoke for bug reproduction, auth, database, or webhooks.
 
 ## Parser (Step 2)
 
-After fetching an issue, LarkGuard runs a **deterministic parser** over the evidence packet and returns a `verification_brief` with:
+After fetching an issue, LarkGuard runs a **deterministic parser** (default) over the evidence packet and returns a `verification_brief` with:
 
 - Summary and classification (`reproducible_candidate`, `blocked_missing_info`, `unclear`)
 - Extracted reproduction steps, expected/actual behavior
@@ -58,7 +58,47 @@ After fetching an issue, LarkGuard runs a **deterministic parser** over the evid
 
 **Why deterministic first?** It is fast, reproducible, and demo-friendly — the same issue always yields the same brief. That makes debugging and judging easier before we add LLM variability.
 
-**Next:** `LLMParser` behind the same interface, then Lark workflow execution using the brief as input.
+### Optional TrueFoundry gateway parser
+
+Set `PARSER_MODE=truefoundry_gateway` to send **one** OpenAI-compatible `POST /chat/completions` request through your [TrueFoundry AI Gateway](https://www.truefoundry.com/docs/ai-gateway/chat-completions-overview). The gateway returns JSON that is validated and mapped into `verification_brief`. **Only the parser layer** uses TrueFoundry; adapters and execution are unchanged.
+
+**Required env:**
+
+```env
+PARSER_MODE=truefoundry_gateway
+TRUEFOUNDRY_API_KEY=your_pat_or_vat
+TRUEFOUNDRY_GATEWAY_BASE_URL=https://gateway.truefoundry.ai
+TRUEFOUNDRY_MODEL=provider_account/model_name
+```
+
+**Optional:**
+
+```env
+TRUEFOUNDRY_STRICT_MODE=false
+TRUEFOUNDRY_TIMEOUT_SECONDS=20
+```
+
+| Outcome | What you see |
+|---------|----------------|
+| **Gateway success** | `parser_used: truefoundry_gateway`, `parser_fallback_triggered: false`, `verification_brief.parser_source: truefoundry_gateway`, execution note “produced via TrueFoundry AI Gateway” |
+| **Fallback** (default) | `parser_used: deterministic`, `parser_fallback_triggered: true`, `parser_notes` / `confidence.reason` explain the gateway error; resilience note on `verification_result` |
+| **Strict failure** | `TRUEFOUNDRY_STRICT_MODE=true` → verify errors with `truefoundry_parser_failed` (no deterministic fallback) |
+
+**Test (keep adapter on fake for a safe demo):**
+
+```bash
+PARSER_MODE=truefoundry_gateway LARK_MODE=fake FAULT_INJECTION_MODE=none \
+  python -m src.cli verify --issue-number 2 --local
+```
+
+**Fallback test (missing config):**
+
+```bash
+PARSER_MODE=truefoundry_gateway TRUEFOUNDRY_API_KEY= LARK_MODE=fake \
+  python -m src.cli verify --issue-number 2 --local
+```
+
+**Current limitation:** Single summarization/parsing call — not full LLM agent loops, not TrueFoundry on the execution adapter layer.
 
 ## Execution planning & fake adapter (Step 3)
 
