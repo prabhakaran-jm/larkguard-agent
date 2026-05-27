@@ -14,9 +14,8 @@ Turn messy GitHub bug reports into proof — reproduced, not reproduced, or bloc
 **Sponsor integration:** [getlark.ai](https://getlark.ai) — **live REST + optional CLI today**; MCP/CLI scaffolds for workflow planning. [TrueFoundry AI Gateway](https://www.truefoundry.com) — optional structured parser with deterministic fallback.
 
 <p align="left">
-  <a href="https://getlark.ai"><img src="https://logo.clearbit.com/getlark.ai" alt="getlark.ai logo" height="28"></a>
-  <img src="https://img.shields.io/badge/%E2%9C%95-FFFFFF00" alt="" />
-  <a href="https://www.truefoundry.com"><img src="https://logo.clearbit.com/truefoundry.com" alt="TrueFoundry logo" height="28"></a>
+  <a href="https://getlark.ai"><img alt="Powered by getlark.ai" src="https://img.shields.io/badge/Powered%20by-getlark.ai-0A7BFF"></a>
+  <a href="https://www.truefoundry.com"><img alt="Powered by TrueFoundry" src="https://img.shields.io/badge/Powered%20by-TrueFoundry-5B4BFF"></a>
 </p>
 
 ## At a glance
