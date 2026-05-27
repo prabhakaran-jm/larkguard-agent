@@ -23,7 +23,7 @@ Turn messy GitHub bug reports into proof — reproduced, not reproduced, or bloc
 
 - **Problem:** bug reports are noisy; repro effort is expensive and inconsistent.
 - **Solution:** evidence-first pipeline from issue text to replayable verification outcome.
-- **Live proof:** deterministic workflow selection + invoke evidence (`wflw_exec_*`).
+- **Live proof:** deterministic workflow selection + invoke evidence (`wflw_exec_*`) + issue-driven run artifacts.
 - **Resilience:** explicit health modes (`healthy`, `degraded-parser`, `degraded-adapter`, `degraded-both`).
 
 ```mermaid
@@ -49,9 +49,9 @@ Bug reports are noisy. Maintainers waste time guessing whether an issue is actio
 - Local JSON run storage for replay/debug
 
 **Step 2**
-- Deterministic parser → structured `verification_brief`
+- Deterministic parser (default) → structured `verification_brief`
+- Optional **TrueFoundry AI Gateway** parser (`PARSER_MODE=truefoundry_gateway`) with deterministic fallback
 - Rule-based classification, confidence, and verification mode
-- Parser interface ready for a future LLM-backed implementation
 
 **Step 3**
 - Execution planning → `verification_plan` from the brief
@@ -59,7 +59,7 @@ Bug reports are noisy. Maintainers waste time guessing whether an issue is actio
 - End-to-end verify output: evidence → brief → plan → result
 
 **Step 4**
-- Config-driven adapter selection (`fake` vs getlark scaffold modes)
+- Config-driven adapter selection (`fake`, getlark scaffolds, `getlark_cli_live`, `getlark_live_check`)
 - Graceful fallback to fake when `GETLARK_API_KEY` is missing
 
 **Step 4b (getlark.ai alignment)**
@@ -75,9 +75,10 @@ Bug reports are noisy. Maintainers waste time guessing whether an issue is actio
 **Step 6**
 - Idempotent managed GitHub comment (create vs update)
 - `demo-issue-text` CLI helper for seed issues
-- Compact comment layout + richer verify CLI summary
+- Compact verify CLI summary (`Health=…`, workflow/invoke fields, issue-driven run); `--json` for full payload
+- `demo-summary` for judge-friendly replay of a stored run
 
-**Not yet:** Full getlark workflow invoke for bug reproduction, auth, database, or webhooks.
+**Not yet:** Per-issue dynamic getlark workflow creation, target-app bug reproduction end-to-end, auth, database, or webhooks. (Optional workflow **invoke** and `wflw_exec_*` capture are implemented.)
 
 ## Parser (Step 2)
 
@@ -138,20 +139,22 @@ After parsing, LarkGuard builds a **verification plan** (workflow name, goal, pr
 
 This makes the demo flow visible: **plan → execute → result**, with statuses like `blocked`, `simulated`, or `not_reproduced` and execution artifacts (notes, logs).
 
-**Why fake execution first?** You can demo the full pipeline and stored run JSON before wiring Lark MCP. The `LarkAdapter` interface is ready to swap in a real implementation.
+**Why fake execution first?** You can demo the full pipeline and stored run JSON before wiring live getlark calls. The `LarkAdapter` interface supports fake, scaffolds, live CLI list, and live REST list/invoke.
 
-**Next:** Real Lark MCP adapter behind the same interface, wrapped by a resilience gateway.
+**Next:** Full MCP tool calls and `getlark workflows invoke --wait` for target-app reproduction.
 
 ## getlark.ai adapter modes
 
 | Mode | Env | Behavior |
 |------|-----|----------|
 | `fake` (default) | `LARK_MODE=fake` or unset | Reliable simulated execution |
-| `getlark_mcp` | `LARK_MODE=getlark_mcp` + `GETLARK_API_KEY` | Scaffold describes MCP workflow at `api.getlark.ai/mcp`; **no HTTP calls** |
-| `getlark_cli` | `LARK_MODE=getlark_cli` + `GETLARK_API_KEY` | Scaffold shows `getlark workflows create/invoke` commands; **no subprocess** |
-| `getlark_cli_live` | `LARK_MODE=getlark_cli_live` + `GETLARK_API_KEY` | **Real CLI** — runs `getlark workflows list`, captures stdout as evidence |
-| `getlark_live_check` | `LARK_MODE=getlark_live_check` + `GETLARK_API_KEY` | **Real HTTP** `GET /workflows`; optional `POST /workflows/{id}/invoke` when enabled |
+| `getlark_mcp` | `PRIMARY_ADAPTER_MODE=getlark_mcp` + `GETLARK_API_KEY` | Scaffold (`getlark_mcp_scaffold`); describes MCP workflow; **no HTTP calls** |
+| `getlark_cli` | `PRIMARY_ADAPTER_MODE=getlark_cli` + `GETLARK_API_KEY` | Scaffold (`getlark_cli_scaffold`); shows intended CLI commands; **no subprocess** |
+| `getlark_cli_live` | `PRIMARY_ADAPTER_MODE=getlark_cli_live` + `GETLARK_API_KEY` | **Real CLI** — runs `getlark workflows list`, captures stdout as evidence |
+| `getlark_live_check` | `PRIMARY_ADAPTER_MODE=getlark_live_check` + `GETLARK_API_KEY` | **Real HTTP** `GET /workflows`; optional `POST /workflows/{id}/invoke` when enabled |
 | Missing API key | mode set, no `GETLARK_API_KEY` | **Falls back to fake** with a note in `verification_result` |
+
+`LARK_MODE` and `PRIMARY_ADAPTER_MODE` accept the same values; when both are set, **`PRIMARY_ADAPTER_MODE` wins**. Alias: `openapi_mcp` → `getlark_mcp`.
 
 ### Thin real getlark mode (`getlark_live_check`)
 
@@ -179,7 +182,7 @@ GETLARK_ENABLE_CLI_LIVE=false        # true = also run `getlark workflows list` 
 GETLARK_CLI_BIN=getlark              # path to @getlark/cli binary
 ```
 
-**What counts as a “real call”:** A successful `GET /workflows` with HTTP 2xx and JSON parsed into `verification_result.evidence` (`live_api`, `workflows`, `api_response` artifacts). If `GETLARK_ENABLE_WORKFLOW_INVOKE=true`, LarkGuard also attempts `POST /workflows/{workflow_id}/invoke` and stores invoke evidence (`invoke_attempt`, `invoke_response`, `execution_id`).
+**What counts as a “real call”:** A successful `GET /workflows` with HTTP 2xx and JSON parsed into `verification_result.evidence` (`live_api`, `workflows`, `api_response`, plus `workflow_selected`, `invoke_status`, `issue_workflow_run`). If `GETLARK_ENABLE_WORKFLOW_INVOKE=true`, LarkGuard also attempts `POST /workflows/{workflow_id}/invoke` and stores invoke evidence (`invoke_attempt`, `invoke_response`, `execution_id`).
 
 **On live failure** (`GETLARK_STRICT_MODE=false`, default): verify still completes via **fake adapter**; `fallback_triggered=true`, `adapter_used=fake`, and notes explain the API/CLI error. With `GETLARK_STRICT_MODE=true`, verify returns HTTP 502 with `{adapter_id}_failed` (e.g. `getlark_cli_live_failed`).
 
@@ -258,7 +261,7 @@ python -m src.cli demo-issue-text --type structured
 python -m src.cli demo-issue-text --type degraded
 ```
 
-Copy title/body into a new GitHub issue (or edit an existing test issue).
+Copy title/body into a new GitHub issue (or edit an existing test issue). CLI hints mention `Simulated` for fake/scaffold runs; with `getlark_live_check` + successful invoke, structured issues can show **`reproduced`**.
 
 ### Healthy run (with comments)
 
@@ -283,7 +286,7 @@ Re-run the same issue to see `GitHub comment: updated` in the CLI.
 ### What judges should notice
 
 1. **Evidence-first pipeline** — issue → brief → plan → result (stored + replayable).
-2. **getlark-ready** — scaffold adapter describes MCP/CLI workflow (sponsor alignment).
+2. **getlark-ready** — live REST list/invoke + optional CLI list; scaffolds show intended MCP/CLI workflow shape.
 3. **Resilience** — degraded run completes via fake fallback; comment banner makes it obvious.
 4. **Idempotent feedback** — one living verification comment on the issue, updated each run.
 5. **Safe defaults** — fake adapter + optional comments; no live getlark calls required for demo.
@@ -301,10 +304,10 @@ GETLARK_ENABLE_CLI_LIVE=true \
 GETLARK_WORKFLOW_ID=wflw_PThpADVZrGzDczLF4I24c9uZ \
 PARSER_MODE=truefoundry_gateway \
 FAULT_INJECTION_MODE=none \
-python -m src.cli verify --issue-number 2 --local
+python -m src.cli verify --issue-number <N> --local
 ```
 
-Replace `GETLARK_WORKFLOW_ID` with your smoke workflow id from `getlark workflows list`.
+Use a structured reproduction issue in your repo (e.g. issue **#3** if you seeded `demo-issue-text --type structured`). Replace `GETLARK_WORKFLOW_ID` with your smoke workflow id from `getlark workflows list`.
 
 **Judge-friendly replay** (after a run completes):
 
@@ -322,6 +325,7 @@ Execution proof: `wflw_exec_…`
 Workflow selected: `wflw_PThpADVZrGzDczLF4I24c9uZ`
 Selection source: env_id
 Invoke status: success
+Issue-driven run: issue #2 -> workflow wflw_… (selection=env_id, invoke=success, execution_id=wflw_exec_…)
 ```
 
 **Expected managed GitHub comment (key lines):**
@@ -333,7 +337,7 @@ Invoke status: success
 - **Workflow selected:** `wflw_…`
 - **Selection source:** `env_id`
 - **Invoke status:** `success`
-```
+- **Issue-driven run:** `issue #<N> -> workflow wflw_… (selection=env_id, invoke=success, execution_id=wflw_exec_…)`
 
 The managed comment explicitly states that **Reproduced** means live getlark workflow execution proof — not target-app bug reproduction.
 
@@ -421,8 +425,8 @@ Omit `--local` to call the running API instead (default `http://127.0.0.1:8000`)
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/health` | Health check |
-| POST | `/verify` | Fetch and normalize a GitHub issue |
-| POST | `/replay` | Return stored result or re-run |
+| POST | `/verify` | Full pipeline: fetch issue → brief → plan → result (optional GitHub comment) |
+| POST | `/replay` | Load stored run by `run_id`, or re-run verification |
 | GET | `/runs` | List recent run summaries |
 
 ### TrueFoundry resilience demo pair
@@ -435,25 +439,28 @@ TrueFoundry powers structured interpretation; deterministic fallback keeps the w
 
 ## Planned next steps
 
-- **Live getlark MCP/CLI** — HTTP to `api.getlark.ai/mcp` or `@getlark/cli workflows invoke --wait`
-- **LLM parser** — swap in behind the same `Parser` interface for ambiguous reports
-- **Resilience/fallback layer** — wrap adapter execution with graceful degradation
-- **Live getlark execution** — replace scaffolds with real MCP/CLI invokes
+- **Full getlark MCP + invoke --wait** — per-issue workflow create/invoke for target-app reproduction
+- **Hosted deployment** — Docker/one-click run for judges without local setup
+- **Webhook trigger** — auto-verify on new/updated issues
 
 ## Project layout
 
 ```
 src/
-  main.py           # FastAPI routes
-  service.py        # Orchestration
-  parser.py         # Deterministic verification brief parser
-  lark_adapter.py   # Plan + fake/getlark execution adapters
+  main.py                 # FastAPI routes
+  service.py              # Orchestration
+  parser.py               # Deterministic + optional TrueFoundry gateway parser
+  lark_adapter.py         # Plan + fake/getlark execution adapters
   github_comment_poster.py  # Markdown comment render + post
-  github_client.py  # GitHub REST client
-  run_store.py      # Local JSON persistence
-  models.py         # Pydantic schemas
-  config.py         # Environment config
-  cli.py            # Rich CLI
+  github_client.py        # GitHub REST client
+  run_store.py            # Local JSON persistence
+  run_health.py           # Health=healthy/degraded-* summary helpers
+  evidence_utils.py       # Evidence artifact lookup helpers
+  models.py               # Pydantic schemas
+  config.py               # Environment config
+  cli.py                  # Rich CLI
+assets/logos/             # Sponsor logos (README)
+tests/                    # Pytest smoke tests
 ```
 
 ## License
