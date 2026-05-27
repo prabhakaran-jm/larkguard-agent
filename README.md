@@ -1,8 +1,40 @@
 # LarkGuard: Evidence-First Bug Verification
 
+<p align="left">
+  <a href="https://www.python.org/"><img alt="Python 3.11+" src="https://img.shields.io/badge/Python-3.11+-3776AB?logo=python&logoColor=white"></a>
+  <a href="https://fastapi.tiangolo.com/"><img alt="FastAPI" src="https://img.shields.io/badge/FastAPI-API-009688?logo=fastapi&logoColor=white"></a>
+  <a href="https://docs.getlark.ai/cli"><img alt="getlark CLI" src="https://img.shields.io/badge/getlark-CLI%20Live-0A7BFF"></a>
+  <a href="https://docs.getlark.ai/mcp-quickstart"><img alt="getlark MCP" src="https://img.shields.io/badge/getlark-MCP%20Ready-0A7BFF"></a>
+  <a href="https://www.truefoundry.com/docs/ai-gateway/chat-completions-overview"><img alt="TrueFoundry Gateway" src="https://img.shields.io/badge/TrueFoundry-AI%20Gateway-5B4BFF"></a>
+  <img alt="Tests" src="https://img.shields.io/badge/tests-12%20passing-2EA043">
+</p>
+
 Turn messy GitHub bug reports into proof — reproduced, not reproduced, or blocked — with evidence and graceful fallback when agent infrastructure fails.
 
 **Sponsor integration:** [getlark.ai](https://getlark.ai) — **live REST + optional CLI today**; MCP/CLI scaffolds for workflow planning. [TrueFoundry AI Gateway](https://www.truefoundry.com) — optional structured parser with deterministic fallback.
+
+<p align="left">
+  <a href="https://getlark.ai"><img src="https://logo.clearbit.com/getlark.ai" alt="getlark.ai logo" height="28"></a>
+  <img src="https://img.shields.io/badge/%E2%9C%95-FFFFFF00" alt="" />
+  <a href="https://www.truefoundry.com"><img src="https://logo.clearbit.com/truefoundry.com" alt="TrueFoundry logo" height="28"></a>
+</p>
+
+## At a glance
+
+- **Problem:** bug reports are noisy; repro effort is expensive and inconsistent.
+- **Solution:** evidence-first pipeline from issue text to replayable verification outcome.
+- **Live proof:** deterministic workflow selection + invoke evidence (`wflw_exec_*`).
+- **Resilience:** explicit health modes (`healthy`, `degraded-parser`, `degraded-adapter`, `degraded-both`).
+
+```mermaid
+flowchart LR
+    A[GitHub Issue + Comments] --> B[Evidence Packet]
+    B --> C[Verification Brief]
+    C --> D[Verification Plan]
+    D --> E[getlark Adapter]
+    E --> F[Verification Result + Artifacts]
+    F --> G[Managed GitHub Comment]
+```
 
 ## Why this matters
 
