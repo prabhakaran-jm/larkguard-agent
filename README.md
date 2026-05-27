@@ -11,7 +11,7 @@
 
 Turn messy GitHub bug reports into proof — reproduced, not reproduced, or blocked — with evidence and graceful fallback when agent infrastructure fails.
 
-**Sponsor integration:** [getlark.ai](https://getlark.ai) — **live REST + optional CLI today**; MCP/CLI scaffolds for workflow planning. [TrueFoundry AI Gateway](https://www.truefoundry.com) — optional structured parser with deterministic fallback.
+**Sponsor integration:** [getlark.ai](https://getlark.ai) — live REST workflow listing + optional invoke, optional live CLI listing; MCP/CLI scaffolds for full workflow execution. [TrueFoundry AI Gateway](https://www.truefoundry.com) — optional parser with deterministic fallback.
 
 <p align="left">
   <a href="https://getlark.ai"><img alt="getlark.ai" src="assets/logos/lark.png" height="34" style="vertical-align: middle;"></a>
