@@ -93,12 +93,18 @@ def render_verification_comment(response: VerifyResponse) -> str:
     workflow_selected = evidence_content(result, "workflow_selected")
     workflow_source = evidence_content(result, "workflow_selection_source")
     invoke_status = evidence_content(result, "invoke_status")
+    issue_workflow_run = evidence_content(result, "issue_workflow_run")
+    issue_workflow_run_json = evidence_content(result, "issue_workflow_run_json")
     if workflow_selected is not None:
         status_lines.append(f"- **Workflow selected:** `{workflow_selected}`")
     if workflow_source is not None:
         status_lines.append(f"- **Selection source:** `{workflow_source}`")
     if invoke_status is not None:
         status_lines.append(f"- **Invoke status:** `{invoke_status}`")
+    if issue_workflow_run is not None:
+        status_lines.append(f"- **Issue-driven run:** {issue_workflow_run}")
+    if issue_workflow_run_json is not None:
+        status_lines.append("- **Issue run artifact:** `issue_workflow_run_json` captured")
     if response.primary_adapter_requested:
         status_lines.append(
             f"- **Primary requested:** `{response.primary_adapter_requested}`"

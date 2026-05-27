@@ -225,12 +225,15 @@ def _print_verify_summary(result: VerifyResponse) -> None:
         workflow_selected = evidence_content(result.verification_result, "workflow_selected")
         workflow_source = evidence_content(result.verification_result, "workflow_selection_source")
         invoke_status = evidence_content(result.verification_result, "invoke_status")
+        issue_workflow_run = evidence_content(result.verification_result, "issue_workflow_run")
         if workflow_selected:
             console.print(f"[bold]Workflow selected:[/bold] `{workflow_selected}`")
         if workflow_source:
             console.print(f"[dim]Selection source:[/dim] {workflow_source}")
         if invoke_status:
             console.print(f"[dim]Invoke status:[/dim] {invoke_status}")
+        if issue_workflow_run:
+            console.print(f"[dim]Issue-driven run:[/dim] {issue_workflow_run}")
         if result.fallback_triggered:
             console.print(
                 "[yellow]Degraded:[/yellow] fallback from "
@@ -336,6 +339,7 @@ def _render_demo_summary(result: VerifyResponse) -> str:
     workflow_selected = evidence_content(result.verification_result, "workflow_selected")
     workflow_source = evidence_content(result.verification_result, "workflow_selection_source")
     invoke_status = evidence_content(result.verification_result, "invoke_status")
+    issue_workflow_run = evidence_content(result.verification_result, "issue_workflow_run")
 
     lines = [
         f"# LarkGuard Demo Summary ({result.run_id})",
@@ -351,6 +355,8 @@ def _render_demo_summary(result: VerifyResponse) -> str:
         lines.append(f"- Selection source: `{workflow_source}`")
     if invoke_status:
         lines.append(f"- Invoke status: `{invoke_status}`")
+    if issue_workflow_run:
+        lines.append(f"- Issue-driven run: {issue_workflow_run}")
     lines.extend(
         [
             f"- Workflow: `{workflow}`",

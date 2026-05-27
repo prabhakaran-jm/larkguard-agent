@@ -135,7 +135,10 @@ def test_live_check_marks_reproduced_when_invoke_succeeds(monkeypatch) -> None:
     assert "workflow_selected" in labels
     assert "workflow_selection_source" in labels
     assert "invoke_status" in labels
+    assert "issue_workflow_run" in labels
+    assert "issue_workflow_run_json" in labels
     assert evidence_content(result, "invoke_status") == "success"
+    assert evidence_content(result, "issue_workflow_run") is not None
     assert any("Lark workflow invoked successfully." in note for note in result.execution_notes)
 
 
@@ -173,6 +176,9 @@ def test_canonical_sponsor_demo_evidence_shape(monkeypatch) -> None:
     assert evidence_content(result, "workflow_selection_source") == "env_id"
     assert evidence_content(result, "invoke_status") == "success"
     assert evidence_content(result, "execution_id") == "wflw_exec_demo (workflow wflw_demo)"
+    run_outcome = evidence_content(result, "issue_workflow_run")
+    assert run_outcome is not None
+    assert "issue #2 -> workflow wflw_demo" in run_outcome
 
 
 def test_comment_includes_sponsor_lines_for_live_parser_and_adapter() -> None:
@@ -199,6 +205,19 @@ def test_comment_includes_sponsor_lines_for_live_parser_and_adapter() -> None:
                 kind=ArtifactKind.NOTE,
                 label="invoke_status",
                 content="success",
+            ),
+            ExecutionArtifact(
+                kind=ArtifactKind.NOTE,
+                label="issue_workflow_run",
+                content=(
+                    "issue #2 -> workflow wflw_123 "
+                    "(selection=env_id, invoke=success, execution_id=wflw_exec_123)"
+                ),
+            ),
+            ExecutionArtifact(
+                kind=ArtifactKind.TRACE,
+                label="issue_workflow_run_json",
+                content='{"issue_number":2,"workflow_selected":"wflw_123"}',
             ),
         ],
         execution_notes=["Lark workflow invoked successfully."],
@@ -238,6 +257,7 @@ def test_comment_includes_sponsor_lines_for_live_parser_and_adapter() -> None:
     assert "**Workflow selected:** `wflw_123`" in comment
     assert "**Selection source:** `env_id`" in comment
     assert "**Invoke status:** `success`" in comment
+    assert "**Issue-driven run:** issue #2 -> workflow wflw_123" in comment
 
 
 def test_degraded_both_health_and_comment_headline() -> None:

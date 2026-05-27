@@ -529,6 +529,14 @@ class GetLarkLiveCheckAdapter(LarkAdapter):
                 invoke_enabled=invoke_enabled,
             )
         )
+        evidence.extend(
+            _issue_workflow_run_artifacts(
+                issue,
+                workflow_refs=listing.workflow_refs,
+                invoke=invoke,
+                invoke_enabled=invoke_enabled,
+            )
+        )
         extra_notes = [
             f"Real getlark API call: GET {listing.endpoint}",
             "This confirms API key and connectivity, not bug reproduction",
@@ -1163,6 +1171,63 @@ def _workflow_invoke_evidence(
         ),
     ]
     return artifacts
+
+
+def _issue_workflow_run_artifacts(
+    issue: IssueSummary,
+    *,
+    workflow_refs: list[GetLarkWorkflowRef],
+    invoke: GetLarkInvokeResult | None,
+    invoke_enabled: bool,
+) -> list[ExecutionArtifact]:
+    pick = pick_workflow_with_source(
+        workflow_refs,
+        workflow_id=GETLARK_WORKFLOW_ID,
+        workflow_name=GETLARK_WORKFLOW_NAME,
+    )
+    selected = invoke.workflow_id if invoke and invoke.workflow_id else pick.workflow_id
+    source = (
+        invoke.workflow_selection_source
+        if invoke and invoke.workflow_selection_source
+        else pick.selection_source
+    ) or "none"
+    invoke_status = describe_invoke_status(
+        invoke,
+        invoke_enabled=invoke_enabled,
+        has_workflows=bool(workflow_refs),
+    )
+    execution_id = invoke.execution_id if invoke and invoke.execution_id else None
+    invoke_http_status = invoke.status_code if invoke else None
+    invoke_endpoint = invoke.endpoint if invoke else None
+
+    summary = (
+        f"issue #{issue.number} -> workflow {selected or '(none)'} "
+        f"(selection={source}, invoke={invoke_status}"
+        + (f", execution_id={execution_id}" if execution_id else "")
+        + ")"
+    )
+    payload = {
+        "issue_number": issue.number,
+        "issue_title": issue.title,
+        "workflow_selected": selected,
+        "workflow_selection_source": source,
+        "invoke_status": invoke_status,
+        "execution_id": execution_id,
+        "invoke_http_status": invoke_http_status,
+        "invoke_endpoint": invoke_endpoint,
+    }
+    return [
+        ExecutionArtifact(
+            kind=ArtifactKind.NOTE,
+            label="issue_workflow_run",
+            content=summary,
+        ),
+        ExecutionArtifact(
+            kind=ArtifactKind.TRACE,
+            label="issue_workflow_run_json",
+            content=json.dumps(payload, indent=2)[:1200],
+        ),
+    ]
 
 
 def run_getlark_cli_list_best_effort() -> GetLarkCliListResult:
